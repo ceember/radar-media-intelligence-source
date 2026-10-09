@@ -1,8 +1,8 @@
 # Radar Media Intelligence — Corresponding Source
 
-This is the modified Radar by Massimo Scognamiglio and contributors (https://github.com/Scognamiglio1969/radar-intelligence) running at https://radar-media-intelligence.vercel.app.
+This is the modified Radar by Massimo Scognamiglio and contributors (https://github.com/Scognamiglio1969/radar-intelligence) for https://radar-media-intelligence.vercel.app.
 
-Production commit: `28e2aabf2d93c2bb865b44e78e67d81865bc2b0c`. This snapshot contains no private development history, credentials, operational evidence or client datasets. Licence: GNU AGPL-3.0; see LICENSE and NOTICE. Planet textures: Solar System Scope, https://www.solarsystemscope.com/textures/, CC BY 4.0. Bundled font attribution: app/fonts/OFL.txt.
+Corresponding source for production commit `410e738ff09aac1cb89e6eadc0d3b44f1ada3aae`. See deployment history for when it went live. This snapshot contains no private development history, credentials, operational evidence or client datasets. Licence: GNU AGPL-3.0; see LICENSE and NOTICE. Planet textures: Solar System Scope, https://www.solarsystemscope.com/textures/, CC BY 4.0. Bundled font attribution: app/fonts/OFL.txt.
 
 ## Build And Run
 
@@ -12,7 +12,7 @@ Use Node.js 24 and npm. No external database or provider credential is needed to
 npm ci --ignore-scripts
 npx next typegen
 npx tsc --noEmit
-npm run build
+SOURCE_COMMIT=410e738ff09aac1cb89e6eadc0d3b44f1ada3aae npm run build
 RADAR_OPEN_TEST=1 npm start
 ```
 

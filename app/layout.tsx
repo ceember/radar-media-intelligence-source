@@ -8,6 +8,7 @@ import { getCurrentProject, getLastIngestAt, getProjects, getPulse, getRecentAle
 import { LiveFavicon } from '@/components/live-favicon';
 import { getCurrentUser } from '@/lib/auth';
 import { countPeople } from '@/lib/people-insights';
+import { SourceFooter } from '@/components/source-footer';
 
 const geistSans = { variable: 'geist_a71539c9-module__T19VSG__variable' };
 const geistMono = { variable: 'geist_mono_8d43a2aa-module__8Li5zG__variable' };
@@ -68,6 +69,7 @@ export default async function RootLayout({
             <div className="mx-auto max-w-[1250px]">
               <ExportBar />
               <main>{children}</main>
+              <SourceFooter />
             </div>
           </div>
         </div>
