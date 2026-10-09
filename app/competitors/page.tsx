@@ -19,6 +19,8 @@ import { CompetitorArchiveHistory } from '@/components/competitor-archive-histor
 import { seoCaptureEvidence } from '@/lib/competitor-seo';
 import { CompetitorSeo } from '@/components/competitor-seo';
 import { configuredCompetitorSeed } from '@/lib/competitor-seed';
+import { technologyCaptureEvidence } from '@/lib/competitor-technologies';
+import { CompetitorTechnologies } from '@/components/competitor-technologies';
 
 export const metadata = { title: 'Competitor Intelligence' };
 const stamp = (value: string) => new Intl.DateTimeFormat('en-ZA', { timeZone: 'Africa/Johannesburg', dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) + ' SAST';
@@ -35,6 +37,7 @@ export default async function CompetitorPage() {
   const reviews = await offerReviewHistory(project.id);
   const [archivePages, archiveLookups] = await Promise.all([archiveSelection(project.id), archiveHistory(project.id)]);
   const seo = await seoCaptureEvidence(project.id, pages);
+  const technologies = await technologyCaptureEvidence(project.id, pages);
   return <div className="min-w-0 space-y-6"><PageHeader title="Competitor Intelligence" subtitle={`Public page evidence for “${project.name}”.`} />
     <section className="space-y-4 rounded-xl border border-white/10 bg-white/[0.02] p-4 sm:p-6">
       <h2 className="text-lg font-semibold text-slate-100">Selected Public Pages</h2>
@@ -45,6 +48,7 @@ export default async function CompetitorPage() {
     <CompetitorAdEvidence projectId={project.id} brands={brands} pages={pages} observations={observations} canWrite={enabled} today={adToday()} />
     <CompetitorArchiveHistory projectId={project.id} pages={pages} selected={archivePages} lookups={archiveLookups} canWrite={enabled}/>
     <CompetitorSeo pages={pages} captures={seo}/>
+    <CompetitorTechnologies pages={pages} captures={technologies}/>
     <h2 className="text-xl font-semibold text-slate-100">Competitor Changes</h2>
     {!pages.length && <EmptyState message="Select a public home or package page, then capture it to create a dated baseline." />}
     {pages.map((page, index) => {

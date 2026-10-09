@@ -1,0 +1,189 @@
+{
+  "source": "https://github.com/enthec/webappanalyzer",
+  "commit": "eea872af449e207e055398f7369d11ee48c8ea03",
+  "license": "GPL-3.0",
+  "notice": "Curated subset, modified for Radar on 2026-10-08. Matching uses native bounded structural rules, never evaluates these upstream regular expressions.",
+  "technologies": {
+    "MailChimp": {
+      "sourceFile": "src/technologies/m.json",
+      "html": [
+        "<input [^>]*id=\"mc-email\"\\;confidence:20",
+        "<!-- Begin MailChimp Signup Form -->"
+      ],
+      "scriptSrc": [
+        "s3\\.amazonaws\\.com/downloads\\.mailchimp\\.com/js/mc-validate\\.js",
+        "cdn-images\\.mailchimp\\.com/[^>]*\\.css",
+        "chimpstatic\\.com/mcjs-connected"
+      ]
+    },
+    "Matomo Analytics": {
+      "sourceFile": "src/technologies/m.json",
+      "meta": {
+        "apple-itunes-app": "app-id=737216887",
+        "generator": "(?:Matomo|Piwik) - Open Source Web Analytics",
+        "google-play-app": "app-id=org\\.piwik\\.mobile2"
+      },
+      "scriptSrc": [
+        "piwik\\.js|piwik\\.php"
+      ]
+    },
+    "React": {
+      "sourceFile": "src/technologies/r.json",
+      "html": [
+        "<[^>]+data-react"
+      ],
+      "meta": {
+        "description": "^Web site created using create-react-app$",
+        "og:image": "%REACT_APP_SEO_IMAGE_URL%"
+      },
+      "scriptSrc": [
+        "react(?:-with-addons)?[.-](\\d+(?:\\.\\d+)+)[^/]*\\.js\\;version:\\1",
+        "/([\\d\\.]+)/react(?:\\.min)?\\.js\\;version:\\1",
+        "^react\\b.*\\.js"
+      ]
+    },
+    "Ghost": {
+      "sourceFile": "src/technologies/g.json",
+      "meta": {
+        "generator": "Ghost(?:\\s([\\d.]+))?\\;version:\\1"
+      }
+    },
+    "Google Analytics": {
+      "sourceFile": "src/technologies/g.json",
+      "scriptSrc": [
+        "google-analytics\\.com/(?:ga|urchin|analytics)\\.js",
+        "googletagmanager\\.com/gtag/js"
+      ]
+    },
+    "Google Tag Manager": {
+      "sourceFile": "src/technologies/g.json",
+      "html": [
+        "googletagmanager\\.com/ns\\.html[^>]+></iframe>",
+        "<!-- (?:End )?Google Tag Manager -->"
+      ],
+      "scriptSrc": [
+        "googletagmanager\\.com/gtm\\.js",
+        "\\.googletagmanager\\.com/"
+      ]
+    },
+    "Shopify": {
+      "sourceFile": "src/technologies/s.json",
+      "meta": {
+        "shopify-checkout-api-token": "",
+        "shopify-digital-wallet": ""
+      },
+      "scriptSrc": [
+        "sdks\\.shopifycdn\\.com",
+        "cdn\\.shopify\\.com"
+      ]
+    },
+    "Joomla": {
+      "sourceFile": "src/technologies/j.json",
+      "html": [
+        "(?:<div[^>]+id=\"wrapper_r\"|<(?:link|script)[^>]+(?:feed|components)/com_|<table[^>]+class=\"pill)\\;confidence:50"
+      ],
+      "meta": {
+        "generator": "Joomla!(?: ([\\d.]+))?\\;version:\\1"
+      },
+      "scriptSrc": [
+        "(?:^|/)(feed/com_|components/com_)"
+      ]
+    },
+    "jQuery": {
+      "sourceFile": "src/technologies/j.json",
+      "scriptSrc": [
+        "jquery",
+        "/jquery(?:-(\\d+\\.\\d+\\.\\d+))[/.-]\\;version:\\1",
+        "/(\\d+\\.\\d+\\.\\d+)/jquery(?!\\.popupoverlay\\.js|(?:\\.[\\w-]*)*fancybox)[/.-][^u]\\;version:\\1"
+      ]
+    },
+    "Drupal": {
+      "sourceFile": "src/technologies/d.json",
+      "html": [
+        "<(?:link|style)[^>]+\"/sites/(?:default|all)/(?:themes|modules)/"
+      ],
+      "meta": {
+        "generator": "^Drupal(?:\\s([\\d.]+))?\\;version:\\1"
+      },
+      "scriptSrc": [
+        "drupal\\.js"
+      ]
+    },
+    "Hotjar": {
+      "sourceFile": "src/technologies/h.json",
+      "scriptSrc": [
+        "//static\\.hotjar\\.com/"
+      ]
+    },
+    "HubSpot": {
+      "sourceFile": "src/technologies/h.json",
+      "html": [
+        "<!-- Start of Async HubSpot"
+      ],
+      "scriptSrc": [
+        "\\.hs-scripts\\.com/"
+      ]
+    },
+    "Vue.js": {
+      "sourceFile": "src/technologies/v.json",
+      "html": [
+        "<(?!svg)[^>]+\\sdata-v(?:ue)?-"
+      ],
+      "scriptSrc": [
+        "vue[.-]([\\d.]*\\d)[^/]*\\.js\\;version:\\1",
+        "(?:/([\\d.]+))?/vue(?:\\.min)?\\.js\\;version:\\1"
+      ]
+    },
+    "Nuxt.js": {
+      "sourceFile": "src/technologies/n.json",
+      "html": [
+        "<div [^>]*id=\"__nuxt\"",
+        "<script [^>]*>window\\.__NUXT__"
+      ],
+      "scriptSrc": [
+        "/_nuxt/"
+      ]
+    },
+    "Webflow": {
+      "sourceFile": "src/technologies/w.json",
+      "meta": {
+        "generator": "Webflow"
+      }
+    },
+    "Wix": {
+      "sourceFile": "src/technologies/w.json",
+      "meta": {
+        "generator": "Wix\\.com Website Builder"
+      },
+      "scriptSrc": [
+        "static\\.parastorage\\.com"
+      ]
+    },
+    "WordPress": {
+      "sourceFile": "src/technologies/w.json",
+      "html": [
+        "<link rel=[\"']stylesheet[\"'] [^>]+/wp-(?:content|includes)/",
+        "<link[^>]+s\\d+\\.wp\\.com"
+      ],
+      "meta": {
+        "generator": "^WordPress(?: ([\\d.]+))?\\;version:\\1",
+        "shareaholic:wp_version": ""
+      },
+      "scriptSrc": [
+        "/wp-(?:content|includes)/",
+        "wp-embed\\.min\\.js",
+        "wp-static\\.assets\\.sh/"
+      ]
+    },
+    "Bootstrap": {
+      "sourceFile": "src/technologies/b.json",
+      "html": [
+        "<style>\\s+/\\*!\\s+\\* Bootstrap v(\\d\\.\\d\\.\\d)\\;version:\\1",
+        "<link[^>]* href=[^>]*?bootstrap(?:[^>]*?([0-9a-fA-F]{7,40}|[\\d]+(?:.[\\d]+(?:.[\\d]+)?)?)|)[^>-]*?(?:\\.min)?\\.css\\;version:\\1"
+      ],
+      "scriptSrc": [
+        "(?:/|-)bootstrap(?:[^/]*?([0-9a-fA-F]{7,40}|[\\d]+(?:\\.[\\d]+(?:\\.[\\d]+)?)?)|)[^/]*?(?:\\.min)?\\.js\\;version:\\1"
+      ]
+    }
+  }
+}
