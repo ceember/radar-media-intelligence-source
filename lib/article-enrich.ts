@@ -1,0 +1,76 @@
+import { and, desc, eq, isNull, isNotNull, sql } from 'drizzle-orm';
+import { getDb } from '@/lib/db';
+import { mentions } from '@/lib/db/schema';
+import { fetchArticles } from '@/lib/article-text';
+
+/**
+ * Scarica il testo degli articoli non ancora tentati, dai più recenti.
+ *
+ * Un tetto per giro tiene il passo educato verso le testate e la durata della
+ * pipeline prevedibile: la coda si smaltisce nei giri successivi. `articleAt`
+ * si marca SEMPRE, anche quando l'estrazione fallisce — un paywall o una pagina
+ * irraggiungibile non deve essere ritentata a ogni ciclo per sempre.
+ */
+export async function enrichArticles(projectId: number, limit = 150): Promise<{
+  tried: number; extracted: number;
+}> {
+  const db = await getDb();
+
+  // I link Google News non portano alla testata (identificatore opaco risolto
+  // via JavaScript): si segnano come tentati in blocco, così escono dalla coda
+  // e non consumano il budget di richieste di ogni giro.
+  await db.update(mentions).set({ articleAt: new Date() })
+    .where(and(
+      eq(mentions.projectId, projectId),
+      isNull(mentions.articleAt),
+      sql`${mentions.url} ILIKE '%news.google.%'`,
+    ));
+
+  const todo = await db.select({ id: mentions.id, url: mentions.url })
+    .from(mentions)
+    .where(and(
+      eq(mentions.projectId, projectId),
+      eq(mentions.kind, 'article'),
+      isNull(mentions.articleAt),
+      isNotNull(mentions.url),
+    ))
+    .orderBy(desc(mentions.publishedAt))
+    .limit(limit);
+
+  const jobs = todo.filter((r): r is { id: number; url: string } => Boolean(r.url));
+  if (jobs.length === 0) return { tried: 0, extracted: 0 };
+
+  const texts = await fetchArticles(jobs);
+
+  for (const job of jobs) {
+    const article = texts.get(job.id);
+    await db.update(mentions)
+      .set({ articleAt: new Date(), ...(article ? { articleText: article.text, articleMeta: article.metadata } : {}) })
+      .where(and(eq(mentions.id, job.id), eq(mentions.projectId, projectId)));
+  }
+
+  return { tried: jobs.length, extracted: texts.size };
+}
+
+/**
+ * Copertura del testo pieno. Serve a rendere visibile una cosa che altrimenti
+ * si può solo indovinare: perché alcuni articoli si aprono e altri no. Senza
+ * questo, un progetto alimentato solo da Google News sembra semplicemente rotto.
+ */
+export async function articleCoverage(projectId: number): Promise<{
+  articles: number; withText: number; opaque: number; posts: number;
+}> {
+  const db = await getDb();
+  const [r] = await db.select({
+    articles: sql<number>`count(*) FILTER (WHERE ${mentions.kind} = 'article')`,
+    withText: sql<number>`count(*) FILTER (WHERE ${mentions.articleText} IS NOT NULL)`,
+    opaque: sql<number>`count(*) FILTER (WHERE ${mentions.kind} = 'article' AND ${mentions.url} ILIKE '%news.google.%')`,
+    posts: sql<number>`count(*) FILTER (WHERE ${mentions.kind} = 'post')`,
+  }).from(mentions).where(eq(mentions.projectId, projectId));
+  return {
+    articles: Number(r?.articles ?? 0),
+    withText: Number(r?.withText ?? 0),
+    opaque: Number(r?.opaque ?? 0),
+    posts: Number(r?.posts ?? 0),
+  };
+}

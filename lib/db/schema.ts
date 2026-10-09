@@ -1,0 +1,718 @@
+import type { ArticleMetadata } from '../article-extract';
+import type { FeedSelectors } from '../feed-from-page';
+import type { ReaderState } from '../article-reader-fallback';
+import type { BlueskyContextSnapshot, BlueskyContextReason } from '../bluesky-context-types';
+import {
+  pgTable, serial, text, integer, real, jsonb, timestamp, date,
+} from 'drizzle-orm/pg-core';
+import type { TextSuggestions } from '../text-triage-types';
+import type { ResearchSource } from '../web-research-types';
+import type { NewsjackMode, NewsjackProfile, NewsjackResult } from '../newsjack-types';
+import type {PlanningMode,CoverageConfig} from '../newsjack-planning-types';
+import type { VisibilityResult } from '../newsjack-visibility-types';
+
+export const newsjackPlanningRuns=pgTable('newsjack_planning_runs',{
+ id:serial('id').primaryKey(),projectId:integer('project_id').notNull(),userId:integer('user_id').notNull(),mode:text('mode').$type<PlanningMode>().notNull(),input:text('input').notNull().default(''),status:text('status').notNull().default('running'),result:jsonb('result').$type<NewsjackResult>(),error:text('error'),createdAt:timestamp('created_at',{withTimezone:true}).notNull().defaultNow(),
+});
+export const newsjackCoverageConfig=pgTable('newsjack_coverage_config',{
+ projectId:integer('project_id').primaryKey(),config:jsonb('config').$type<CoverageConfig>().notNull(),updatedAt:timestamp('updated_at',{withTimezone:true}).notNull().defaultNow(),
+});
+
+export const newsjackVisibilityRuns = pgTable('newsjack_visibility_runs', {
+  id: serial('id').primaryKey(), projectId: integer('project_id').notNull(), userId: integer('user_id').notNull(),
+  input: text('input').notNull().default(''), status: text('status').notNull().default('running'),
+  result: jsonb('result').$type<VisibilityResult>(), error: text('error'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const newsjackProfiles = pgTable('newsjack_profiles', {
+  projectId: integer('project_id').primaryKey(),
+  profile: jsonb('profile').$type<NewsjackProfile>().notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+export const newsjackRuns = pgTable('newsjack_runs', {
+  id: serial('id').primaryKey(), projectId: integer('project_id').notNull(), userId: integer('user_id').notNull(),
+  mode: text('mode').$type<NewsjackMode>().notNull(), input: text('input').notNull().default(''),
+  status: text('status').notNull().default('running'), result: jsonb('result').$type<NewsjackResult>(), error: text('error'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type Engagement = {
+  likes?: number; comments?: number; shares?: number; views?: number;
+};
+
+export const researchRuns = pgTable('research_runs', {
+  id: serial('id').primaryKey(),
+  projectId: integer('project_id').notNull(),
+  userId: integer('user_id').notNull(),
+  question: text('question').notNull(),
+  status: text('status').notNull().default('running'),
+  queries: jsonb('queries').$type<string[]>().notNull().default([]),
+  sources: jsonb('sources').$type<ResearchSource[]>().notNull().default([]),
+  answer: text('answer').notNull().default(''),
+  warnings: jsonb('warnings').$type<string[]>().notNull().default([]),
+  error: text('error'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type Quality = {
+  score: number; relevance: number; virality: number;
+  risk: 'low' | 'medium' | 'high'; note?: string;
+};
+
+export const users = pgTable('users', {
+  id: serial('id').primaryKey(),
+  name: text('name').notNull(),
+  email: text('email').notNull().unique(),
+  passwordHash: text('password_hash').notNull(),
+  role: text('role').notNull().default('member'), // 'admin' | 'member'
+  // AI attiva per i progetti di questo utente (admin sempre true).
+  // I membri restano "dormienti" finché l'admin non li accende (serve budget).
+  aiEnabled: integer('ai_enabled').notNull().default(0),
+  mustChangePassword: integer('must_change_password').notNull().default(1),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type KeyMessage = { id: string; text: string; terms: string[] };
+
+export const projects = pgTable('projects', {
+  id: serial('id').primaryKey(),
+  name: text('name').notNull(),
+  // 'listening' = raccolta automatica da fonti web; 'upload' = ingestion di file
+  // (Excel/CSV) caricati dall'utente, nessuno scraping; 'talkwalker' = i dati
+  // arrivano dall'API Talkwalker aziendale, unica fonte attiva del progetto.
+  mode: text('mode').notNull().default('listening'),
+  /** Id del progetto Talkwalker da interrogare (solo mode='talkwalker'). */
+  talkwalkerProject: text('talkwalker_project'),
+  /** Topic Talkwalker da cui prendere i documenti; vuoto = tutto il progetto. */
+  talkwalkerTopics: jsonb('talkwalker_topics').$type<string[]>().notNull().default([]),
+  /**
+   * Che cosa seguire negli studi clinici: farmaci, condizioni, sponsor.
+   * Vuoto = la sezione è spenta. Non si riusano le parole chiave del progetto:
+   * "Juventus" o "Bitcoin" in un registro di studi clinici trovano solo rumore.
+   */
+  evidenceTerms: jsonb('evidence_terms').$type<string[]>().notNull().default([]),
+  /**
+   * Il piano d'ascolto: concetti e query costruiti dalla richiesta in
+   * linguaggio naturale (lib/query-plan). Null = progetto con la vecchia
+   * query a tre campi, che resta valida finché il piano non viene salvato.
+   */
+  queryPlan: jsonb('query_plan').$type<import('@/lib/query-plan').QueryPlan>(),
+  // Proprietario del progetto (chi lo ha creato); null = legacy/condiviso a tutti
+  ownerId: integer('owner_id'),
+  // 'private' = solo il proprietario e l'admin; 'shared' = tutto il team lo vede
+  visibility: text('visibility').notNull().default('private'),
+  // Query booleana: keywords = OR (almeno uno), allTerms = AND (tutti),
+  // excludeTerms = NOT (nessuno)
+  keywords: jsonb('keywords').$type<string[]>().notNull().default([]),
+  allTerms: jsonb('all_terms').$type<string[]>().notNull().default([]),
+  excludeTerms: jsonb('exclude_terms').$type<string[]>().notNull().default([]),
+  languages: jsonb('languages').$type<string[]>().notNull().default([]),
+  // Codici paese ISO (es. IT, US): filtra le fonti news per area geografica
+  countries: jsonb('countries').$type<string[]>().notNull().default([]),
+  /** Messaggi chiave del progetto: si misura quanto vengono ripresi (pull-through). */
+  keyMessages: jsonb('key_messages').$type<KeyMessage[]>().notNull().default([]),
+  // Canali Telegram pubblici da sorvegliare (username senza @)
+  telegramChannels: jsonb('telegram_channels').$type<string[]>().notNull().default([]),
+  // Feed RSS/Atom personalizzati da seguire (URL)
+  rssFeeds: jsonb('rss_feeds').$type<string[]>().notNull().default([]),
+  // Tono di voce del brand, usato dal Content Studio
+  brandVoice: text('brand_voice'),
+  // Area semantica: descrizione del tema in linguaggio naturale; genera i
+  // termini di ricerca via AI e guida il giudizio di rilevanza (stelle)
+  semanticContext: text('semantic_context'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const generatedFeedSources = pgTable('generated_feed_sources', {
+  id: integer('id').primaryKey(),
+  projectId: integer('project_id').notNull().unique(),
+  name: text('name').notNull(),
+  url: text('url').notNull(),
+  revision: integer('revision').notNull().default(1),
+  selectors: jsonb('selectors').$type<FeedSelectors>().notNull(),
+  permissionAt: timestamp('permission_at', { withTimezone: true }).notNull(),
+  savedAt: timestamp('saved_at', { withTimezone: true }).notNull().defaultNow(),
+  nextFetchAt: timestamp('next_fetch_at', { withTimezone: true }),
+  checkedAt: timestamp('checked_at', { withTimezone: true }),
+  status: text('status').notNull().default('pending'),
+  error: text('error'),
+  parser: text('parser').notNull(),
+});
+
+export const generatedFeedItems = pgTable('generated_feed_items', {
+  id: serial('id').primaryKey(),
+  projectId: integer('project_id').notNull(),
+  url: text('url').notNull(),
+  urlHash: text('url_hash').notNull(),
+  sourceUrl: text('source_url').notNull(),
+  sourceRevision: integer('source_revision').notNull(),
+  title: text('title').notNull(),
+  summary: text('summary').notNull(),
+  observedAt: timestamp('observed_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  verifiedAt: timestamp('verified_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const benchmarkEntities = pgTable('benchmark_entities', {
+  id: serial('id').primaryKey(),
+  projectId: integer('project_id').notNull(),
+  name: text('name').notNull(),
+  keywords: jsonb('keywords').$type<string[]>().notNull().default([]),
+  // 1 = questa entità è "il tuo brand" (il soggetto dell'analisi), non un competitor.
+  isOwnBrand: integer('is_own_brand').notNull().default(0),
+});
+
+export const mentions = pgTable('mentions', {
+  id: serial('id').primaryKey(),
+  projectId: integer('project_id').notNull(),
+  source: text('source').notNull(),
+  externalId: text('external_id').notNull(),
+  url: text('url'),
+  title: text('title'),
+  content: text('content').notNull().default(''),
+  // Articolo di testata o post social? Dedotto dalla fonte (SOURCE_KIND).
+  // È la distinzione che separa una rassegna stampa dall'ascolto sociale.
+  kind: text('kind').$type<'article' | 'post'>().notNull().default('post'),
+  // Testo integrale dell'articolo, estratto dalla pagina. Il feed RSS dà solo
+  // titolo e sommario: senza questo non si sa se il tema è il soggetto del pezzo
+  // o una citazione di passaggio.
+  articleText: text('article_text'),
+  articleMeta: jsonb('article_meta').$type<ArticleMetadata>(),
+  articleMetaAttemptedAt: timestamp('article_meta_attempted_at', { withTimezone: true }),
+  articleReader: jsonb('article_reader').$type<ReaderState>(),
+  articleReaderAt: timestamp('article_reader_at', { withTimezone: true }),
+  // Quando si è TENTATA l'estrazione (anche fallita): evita di riprovare
+  // all'infinito su paywall e pagine irraggiungibili.
+  articleAt: timestamp('article_at', { withTimezone: true }),
+  textSuggestions: jsonb('text_suggestions').$type<TextSuggestions>(),
+  author: text('author'),
+  authorHandle: text('author_handle'),
+  community: text('community'),
+  publishedAt: timestamp('published_at', { withTimezone: true }).notNull(),
+  fetchedAt: timestamp('fetched_at', { withTimezone: true }).notNull().defaultNow(),
+  language: text('language'),
+  /**
+   * Paese di provenienza (ISO alpha-2 minuscolo), quando si sa.
+   *
+   * Dichiarato dalla fonte quando la fonte lo dichiara (GDELT), altrimenti
+   * dedotto dal dominio nazionale dell'indirizzo (.it, .co.uk). Resta NULL
+   * quando non si sa: su una mappa un colore inventato è indistinguibile da
+   * uno vero, e la lingua NON è il paese — un post in spagnolo può venire da
+   * Madrid come da Città del Messico.
+   */
+  country: text('country'),
+  engagement: jsonb('engagement').$type<Engagement>(),
+  engagementScore: real('engagement_score').notNull().default(0),
+  reach: integer('reach'),
+  sentiment: text('sentiment'),
+  sentimentScore: real('sentiment_score'),
+  // Emozione dominante (Plutchik-lite): joy/trust/fear/anger/sadness/surprise
+  emotion: text('emotion'),
+  // Rilevanza AI rispetto al tema del progetto: 1-5 stelle + motivazione breve
+  relevance: integer('relevance'),
+  relevanceReason: text('relevance_reason'),
+  // Traduzioni cache: { it: { title, content }, en: {...} } — mai ritradotte
+  translations: jsonb('translations').$type<Record<string, { title?: string; content: string }>>(),
+  topics: jsonb('topics').$type<string[]>(),
+  entities: jsonb('entities').$type<string[]>(),
+  quality: jsonb('quality').$type<Quality>(),
+  /**
+   * Le colonne del file che non corrispondono a nessun campo di Radar ma che
+   * NON vanno perse: pillar editoriale, rubrica, campagna, area semantica.
+   * Etichetta scelta dall'utente → valore della riga.
+   */
+  custom: jsonb('custom').$type<Record<string, string>>(),
+  /** Le query del piano che hanno trovato questa menzione. */
+  queryIds: jsonb('query_ids').$type<string[]>().notNull().default([]),
+  analyzedAt: timestamp('analyzed_at', { withTimezone: true }),
+  storyId: integer('story_id'),
+  // Da quale file importato proviene questa mention. Senza questo legame non
+  // si può rimappare o cancellare un file senza toccare il resto del progetto.
+  importFileId: integer('import_file_id'),
+});
+
+export const blueskyContextCache = pgTable('bluesky_context_cache', {
+  id: serial('id').primaryKey(),
+  projectId: integer('project_id').notNull(),
+  mentionId: integer('mention_id').notNull(),
+  rootUri: text('root_uri').notNull(),
+  claimId: text('claim_id').notNull(),
+  status: text('status').notNull(),
+  reason: text('reason').$type<BlueskyContextReason>().notNull(),
+  snapshot: jsonb('snapshot').$type<BlueskyContextSnapshot>(),
+  attemptedAt: timestamp('attempted_at',{ withTimezone:true }).notNull(),
+  completedAt: timestamp('completed_at',{ withTimezone:true }),
+  expiresAt: timestamp('expires_at',{ withTimezone:true }).notNull(),
+});
+
+export const stories = pgTable('stories', {
+  id: serial('id').primaryKey(),
+  projectId: integer('project_id').notNull(),
+  title: text('title').notNull(),
+  summary: text('summary'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const alerts = pgTable('alerts', {
+  id: serial('id').primaryKey(),
+  projectId: integer('project_id').notNull(),
+  type: text('type').notNull(),
+  severity: text('severity').notNull().default('media'),
+  message: text('message').notNull(),
+  data: jsonb('data').$type<Record<string, unknown>>(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const briefs = pgTable('briefs', {
+  id: serial('id').primaryKey(),
+  projectId: integer('project_id').notNull(),
+  briefDate: date('brief_date').notNull(),
+  content: text('content').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const apiUsage = pgTable('api_usage', {
+  id: serial('id').primaryKey(),
+  ts: timestamp('ts', { withTimezone: true }).notNull().defaultNow(),
+  model: text('model').notNull(),
+  purpose: text('purpose').notNull(),
+  inputTokens: integer('input_tokens').notNull().default(0),
+  outputTokens: integer('output_tokens').notNull().default(0),
+  costUsd: real('cost_usd').notNull().default(0),
+});
+
+export const meta = pgTable('meta', {
+  key: text('key').primaryKey(),
+  value: jsonb('value').$type<unknown>(),
+});
+
+// Trend emergenti: temi la cui velocità di crescita è anomala
+export const trends = pgTable('trends', {
+  id: serial('id').primaryKey(),
+  projectId: integer('project_id').notNull(),
+  topic: text('topic').notNull(),
+  n24: integer('n24').notNull(),
+  baseline: real('baseline').notNull(),
+  score: real('score').notNull(),
+  explanation: text('explanation'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+// Narrazioni rilevate (cluster di messaggi che spingono la stessa tesi)
+export const narratives = pgTable('narratives', {
+  id: serial('id').primaryKey(),
+  projectId: integer('project_id').notNull(),
+  title: text('title').notNull(),
+  description: text('description'),
+  stance: text('stance'),
+  coordinated: integer('coordinated').notNull().default(0),
+  accounts: jsonb('accounts').$type<string[]>().notNull().default([]),
+  // Id delle mention che compongono la narrazione (per aprirne i post in Listening).
+  mentionIds: jsonb('mention_ids').$type<number[]>().notNull().default([]),
+  mentionCount: integer('mention_count').notNull().default(0),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+// Profili AI degli autori influenti + bozza di contatto
+export const influencerProfiles = pgTable('influencer_profiles', {
+  id: serial('id').primaryKey(),
+  projectId: integer('project_id').notNull(),
+  author: text('author').notNull(),
+  source: text('source').notNull(),
+  profileMd: text('profile_md').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+// Idee di contenuto generate dal Content Studio
+export const contentIdeas = pgTable('content_ideas', {
+  id: serial('id').primaryKey(),
+  projectId: integer('project_id').notNull(),
+  contentMd: text('content_md').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+// Link di condivisione read-only con scadenza
+export const shareLinks = pgTable('share_links', {
+  id: serial('id').primaryKey(),
+  projectId: integer('project_id').notNull(),
+  token: text('token').notNull(),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+// Timeline: eventi salienti del settore, estratti giorno per giorno dall'AI
+export const timelineEvents = pgTable('timeline_events', {
+  id: serial('id').primaryKey(),
+  projectId: integer('project_id').notNull(),
+  eventDate: date('event_date').notNull(),
+  title: text('title').notNull(),
+  description: text('description'),
+  importance: integer('importance').notNull().default(1),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+// ---------------------------------------------------------------------------
+// Recensioni — sezione autonoma, volutamente separata da `mentions` e dalla
+// pagina Fonti: una recensione non nasce da una ricerca per parole chiave ma
+// da un identificatore fisso (un app id, un place id), e porta un dato che il
+// resto dell'app non ha — il voto — che È il sentiment, senza bisogno di AI.
+// ---------------------------------------------------------------------------
+
+// Una fonte configurata dall'utente: un'app sull'App Store, un luogo su
+// Google, o un lotto importato da file. lastFetchedAt vive qui (non su ogni
+// recensione) perché è lo stato della FONTE, non del singolo voto raccolto.
+export const reviewSources = pgTable('review_sources', {
+  id: serial('id').primaryKey(),
+  projectId: integer('project_id').notNull(),
+  type: text('type').notNull(), // 'appstore' | 'googleplaces' | 'upload'
+  identifier: text('identifier').notNull(), // app id / place id / nome del file importato
+  label: text('label').notNull(),
+  country: text('country'), // solo appstore: codice a 2 lettere, default 'us'
+  lastFetchedAt: timestamp('last_fetched_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const reviews = pgTable('reviews', {
+  id: serial('id').primaryKey(),
+  projectId: integer('project_id').notNull(),
+  sourceId: integer('source_id').notNull(),
+  externalId: text('external_id').notNull(),
+  rating: integer('rating').notNull(), // 1-5, dato di fatto: mai dedotto
+  title: text('title'),
+  content: text('content').notNull().default(''),
+  author: text('author'),
+  url: text('url'),
+  publishedAt: timestamp('published_at', { withTimezone: true }).notNull(),
+  fetchedAt: timestamp('fetched_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+// ---------------------------------------------------------------------------
+// Sport — altra sezione autonoma, stesso principio delle Recensioni: un
+// risultato sportivo non è una menzione, è un fatto con la sua data fissa,
+// serve a incrociarlo con quello che l'ascolto già misura (sentiment) e,
+// quando la società è quotata, con il prezzo dell'azione — non a inseguirlo
+// con una ricerca per parole chiave.
+// ---------------------------------------------------------------------------
+
+// Una squadra seguita da un progetto: la competizione serve solo per mostrare
+// calendario/classifica nel contesto giusto, la ricerca vera è per team id
+// (una squadra gioca più competizioni, es. campionato + coppa europea).
+export const sportSources = pgTable('sport_sources', {
+  id: serial('id').primaryKey(),
+  projectId: integer('project_id').notNull(),
+  competition: text('competition').notNull(), // codice football-data.org: SA, PL, CL, BL1, PD, FL1
+  teamId: text('team_id').notNull(), // id squadra football-data.org
+  teamName: text('team_name').notNull(),
+  ticker: text('ticker'), // simbolo di borsa (es. JUVE.MI) - solo se quotata, opzionale
+  lastFetchedAt: timestamp('last_fetched_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const sportMatches = pgTable('sport_matches', {
+  id: serial('id').primaryKey(),
+  projectId: integer('project_id').notNull(),
+  sourceId: integer('source_id').notNull(),
+  externalId: text('external_id').notNull(), // id partita football-data.org
+  competition: text('competition').notNull(),
+  homeTeam: text('home_team').notNull(),
+  awayTeam: text('away_team').notNull(),
+  homeScore: integer('home_score'), // null finché non giocata
+  awayScore: integer('away_score'),
+  status: text('status').notNull(), // SCHEDULED | LIVE | FINISHED | POSTPONED | ...
+  utcDate: timestamp('utc_date', { withTimezone: true }).notNull(),
+  fetchedAt: timestamp('fetched_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+// Chiusure giornaliere: una riga per ticker per giorno, non per fonte — più
+// progetti che seguono la stessa società condividono lo storico invece di
+// duplicare le stesse chiamate (la quota gratuita è troppo stretta per sprecarla).
+export const stockPrices = pgTable('stock_prices', {
+  id: serial('id').primaryKey(),
+  ticker: text('ticker').notNull(),
+  date: date('date').notNull(),
+  close: real('close').notNull(),
+  changePct: real('change_pct'), // variazione vs la chiusura del giorno di borsa precedente
+  fetchedAt: timestamp('fetched_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+// Interesse di ricerca (Google Trends, API non ufficiale): una riga per entità
+// di benchmark per giorno. Legata a benchmark_entities (non a un ticker come
+// stock_prices) perché qui il confronto è nativo — Trends restituisce fino a
+// 5 termini nella STESSA richiesta, già scalati l'uno rispetto all'altro
+// (100 = picco fra tutti), che è esattamente cosa serve per uno "share of
+// search" fra un brand e i suoi competitor.
+export const searchInterest = pgTable('search_interest', {
+  id: serial('id').primaryKey(),
+  entityId: integer('entity_id').notNull(),
+  date: date('date').notNull(),
+  value: integer('value').notNull(), // 0-100, relativo agli altri termini della stessa richiesta
+  fetchedAt: timestamp('fetched_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+// Pagina Wikipedia sorvegliata: chi la modifica e quando spesso anticipa una
+// crisi reputazionale (edit war, cancellazioni di sezioni scomode, comparsa
+// di account anonimi). Una riga per pagina seguita — un progetto può
+// seguirne più di una, come le squadre in Sport.
+export const wikiPages = pgTable('wiki_pages', {
+  id: serial('id').primaryKey(),
+  projectId: integer('project_id').notNull(),
+  title: text('title').notNull(), // titolo esatto della pagina, mai scritto a mano dall'utente
+  lastFetchedAt: timestamp('last_fetched_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const wikiEdits = pgTable('wiki_edits', {
+  id: serial('id').primaryKey(),
+  projectId: integer('project_id').notNull(),
+  pageId: integer('page_id').notNull(),
+  revId: integer('rev_id').notNull(),
+  user: text('user').notNull(),
+  isAnon: integer('is_anon').notNull().default(0),
+  isMinor: integer('is_minor').notNull().default(0),
+  comment: text('comment').notNull().default(''),
+  size: integer('size').notNull(),
+  sizeDiff: integer('size_diff'), // null se non calcolabile (prima revisione nota)
+  tags: jsonb('tags').$type<string[]>().notNull().default([]),
+  timestamp: timestamp('timestamp', { withTimezone: true }).notNull(),
+  fetchedAt: timestamp('fetched_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+// ---------------------------------------------------------------------------
+// Import di file come materiale GREZZO e riutilizzabile.
+//
+// Il file caricato non viene consumato una volta sola: le sue righe restano in
+// archivio intatte, e le mention si DERIVANO dalla mappatura corrente. Cambiare
+// l'assegnazione di una colonna significa quindi ri-derivare, non ricaricare —
+// ed è per questo che le righe grezze si conservano invece di essere buttate
+// dopo l'inserimento.
+// ---------------------------------------------------------------------------
+export const importFiles = pgTable('import_files', {
+  id: serial('id').primaryKey(),
+  projectId: integer('project_id').notNull(),
+  filename: text('filename').notNull(),
+  sizeBytes: integer('size_bytes').notNull().default(0),
+  rowCount: integer('row_count').notNull().default(0),
+  columns: jsonb('columns').$type<string[]>().notNull().default([]),
+  /** Profilo osservato di ogni colonna: tipo, riempimento, campioni. */
+  profiles: jsonb('profiles').$type<unknown[]>().notNull().default([]),
+  /** Cosa aveva proposto l'AI: si conserva per poter mostrare le motivazioni
+   *  anche a distanza di tempo, e per distinguere le scelte del modello da
+   *  quelle fatte a mano dall'utente. */
+  proposal: jsonb('proposal').$type<unknown[]>(),
+  /** Mappatura in vigore: campo di Radar -> nome colonna. Modificabile sempre. */
+  mapping: jsonb('mapping').$type<Record<string, string>>().notNull().default({}),
+  /** uploaded = letto e profilato · mapped = mappatura confermata · imported = mention derivate */
+  status: text('status').$type<'uploaded' | 'mapped' | 'imported'>().notNull().default('uploaded'),
+  /** Esito dell'ultima derivazione: quante righe sono entrate e cosa è stato scartato. */
+  report: jsonb('report').$type<Record<string, number>>(),
+  /** Le righe grezze sono state eliminate per liberare spazio (niente più rimappatura). */
+  rawPurged: integer('raw_purged').notNull().default(0),
+  /** 1 se l'AI ha partecipato alla proposta; 0 se è solo riconoscimento deterministico. */
+  usedAi: integer('used_ai').notNull().default(0),
+  /** Cosa si è incontrato leggendo il foglio: formule, errori, formule senza valore. */
+  issues: jsonb('issues').$type<Record<string, number>>(),
+  /** Il foglio da cui viene, quando il file ne ha più d'uno. */
+  sheetName: text('sheet_name'),
+  /** mentions = righe con un testo · metrics = serie di misure senza testo. */
+  kind: text('kind').$type<'mentions' | 'metrics'>().notNull().default('mentions'),
+  /** Che tipo di foglio è: da qui nascono gli insight che può dare. */
+  archetype: text('archetype'),
+  /**
+   * Campi che valgono per OGNI riga di questo foglio, e che nel foglio non
+   * stanno in nessuna colonna.
+   *
+   * Il caso vero: quarantatré fogli con le stesse colonne, uno per manager, e
+   * il nome del manager scritto solo nel nome del foglio. Senza questo, quel
+   * dato — l'unico che rende confrontabili i fogli fra loro — si perde.
+   */
+  constants: jsonb('constants').$type<Record<string, string>>().notNull().default({}),
+  /** Le entità di questo foglio sono persone (personal branding). */
+  people: integer('people').notNull().default(0),
+  /** Mappatura del foglio di metriche (data, entità, colonne valore, dimensioni). */
+  metricMap: jsonb('metric_map').$type<Record<string, unknown>>(),
+  /** Colonne conservate ma non mappate: nome colonna → etichetta. */
+  extras: jsonb('extras').$type<Record<string, string>>().notNull().default({}),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  importedAt: timestamp('imported_at', { withTimezone: true }),
+});
+
+/** Le celle originali, esattamente come stavano nel file. Mai modificate. */
+export const importRows = pgTable('import_rows', {
+  id: serial('id').primaryKey(),
+  fileId: integer('file_id').notNull(),
+  rowIndex: integer('row_index').notNull(),
+  data: jsonb('data').$type<Record<string, unknown>>().notNull(),
+});
+
+// ---------------------------------------------------------------------------
+// Report personalizzati.
+//
+// Un report è una SCALETTA, non un documento: conserva quali grafici l'utente
+// ha scelto, in che ordine, e i commenti che ha scritto o fatto scrivere
+// all'AI. I numeri non si salvano mai qui — vengono ricalcolati dall'archivio
+// a ogni esportazione, così lo stesso report riesportato la settimana dopo
+// racconta i dati nuovi invece di fossilizzare quelli vecchi.
+// ---------------------------------------------------------------------------
+export const customReports = pgTable('custom_reports', {
+  id: serial('id').primaryKey(),
+  projectId: integer('project_id').notNull(),
+  title: text('title').notNull(),
+  /** Finestra temporale su cui vengono ricalcolati i dati (giorni). */
+  days: integer('days').notNull().default(30),
+  /** [{ title, blocks: [{type:'chart',section} | {type:'text',text,ai}] }] */
+  pages: jsonb('pages').$type<unknown[]>().notNull().default([]),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+// ---------------------------------------------------------------------------
+// Edizioni del report periodico.
+//
+// A differenza del report personalizzato, qui la scaletta SI CONGELA: un
+// numero di luglio deve continuare a dire quello che diceva a luglio, anche
+// riaperto a dicembre. È un archivio di ciò che è stato detto, non un modello
+// da ricalcolare — ed è per questo che `pages` e `provenance` restano com'erano
+// al momento della generazione.
+// ---------------------------------------------------------------------------
+export const periodicReports = pgTable('periodic_reports', {
+  id: serial('id').primaryKey(),
+  projectId: integer('project_id').notNull(),
+  /** daily · weekly · biweekly · monthly · quarterly · semiannual · annual */
+  cadence: text('cadence').notNull(),
+  periodStart: text('period_start').notNull(),
+  periodEnd: text('period_end').notNull(),
+  pages: jsonb('pages').$type<unknown[]>().notNull().default([]),
+  /** Da dove viene la tesi: quando è stata scritta, su che finestra, su quanti dati. */
+  provenance: jsonb('provenance').$type<Record<string, unknown>>(),
+  /** La TESI usata, congelata: senza, il PDF ristamperebbe quella corrente e
+   *  contraddirebbe la nota di provenienza stampata accanto. */
+  pov: jsonb('pov').$type<unknown>(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+// ---------------------------------------------------------------------------
+// Punti di metrica.
+//
+// I database veri non contengono solo post: contengono SERIE. Follower per
+// piattaforma, pubblicazioni per mese, engagement medio per manager, audience
+// per azienda. Non hanno un testo né un autore — non sono mention, e infilarle
+// lì dentro le distruggerebbe.
+//
+// La forma è volutamente minima e universale: chi, che cosa, quando, quanto, e
+// le dimensioni che qualificano il punto. Qualunque foglio di aggregati, largo
+// o lungo, si riduce a questo.
+// ---------------------------------------------------------------------------
+export const metricPoints = pgTable('metric_points', {
+  id: serial('id').primaryKey(),
+  projectId: integer('project_id').notNull(),
+  /** Da quale file/foglio viene: permette di rifarlo o toglierlo da solo. */
+  importFileId: integer('import_file_id'),
+  /** Chi: un canale, un manager, un brand. Il foglio stesso, se non c'è colonna. */
+  entity: text('entity').notNull(),
+  /** Che cosa: "Follower", "Impressions", "Eng. Rate"… */
+  metric: text('metric').notNull(),
+  date: timestamp('date', { withTimezone: true }).notNull(),
+  value: real('value').notNull(),
+  /** Le dimensioni che qualificano il punto: canale, pillar, azienda, ruolo. */
+  dims: jsonb('dims').$type<Record<string, string>>().notNull().default({}),
+});
+
+// ---------------------------------------------------------------------------
+// I grafici costruiti in Studio Graph.
+//
+// Si salva la DOMANDA (che campi, che aggregazione, che forma), mai i numeri:
+// riaprendo il grafico fra un mese risponde con i dati di quel mese. È la
+// stessa scelta del report personalizzato, per la stessa ragione.
+// ---------------------------------------------------------------------------
+export const studioCharts = pgTable('studio_charts', {
+  id: serial('id').primaryKey(),
+  projectId: integer('project_id').notNull(),
+  title: text('title').notNull(),
+  /** La specifica: sorgente, tipo, assi, aggregazioni, periodo, palette. */
+  spec: jsonb('spec').$type<Record<string, unknown>>().notNull(),
+  /**
+   * Il commento scritto dall'AI su questo grafico, e quando.
+   *
+   * `commentFor` è l'impronta dei numeri che il commento descrive. Quando il
+   * grafico viene rieseguito e l'impronta non torna, il commento se ne va: un
+   * testo che parla di numeri che non ci sono più non è un commento vecchio,
+   * è un commento falso.
+   */
+  comment: text('comment'),
+  commentAt: timestamp('comment_at', { withTimezone: true }),
+  commentFor: text('comment_for'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+// ---------------------------------------------------------------------------
+// Le verifiche dei fact-checker (Google Fact Check Tools).
+//
+// Una riga per affermazione verificata, per progetto. Le recensioni di più
+// testate sulla stessa affermazione stanno insieme: che due fact-checker
+// arrivino a verdetti diversi è un'informazione, non un doppione.
+// ---------------------------------------------------------------------------
+export type FactReview = {
+  publisher: string; site?: string; url: string; title?: string;
+  reviewDate?: string; rating: string; language?: string;
+};
+export type Circulation = {
+  total: number; last7: number; prev7: number;
+  sources: Record<string, number>;
+  sampleIds: number[];
+  lastSeen: string | null;
+  /** Le parole con cui l'affermazione è stata cercata nelle menzioni. */
+  terms: string[];
+  at: string;
+};
+export const factChecks = pgTable('fact_checks', {
+  id: serial('id').primaryKey(),
+  projectId: integer('project_id').notNull(),
+  claimKey: text('claim_key').notNull(),
+  claim: text('claim').notNull(),
+  claimant: text('claimant'),
+  claimDate: timestamp('claim_date', { withTimezone: true }),
+  reviews: jsonb('reviews').$type<FactReview[]>().notNull().default([]),
+  /** false | misleading | mixed | true | unverifiable | other */
+  verdict: text('verdict').notNull(),
+  language: text('language'),
+  query: text('query').notNull(),
+  firstSeen: timestamp('first_seen', { withTimezone: true }).notNull().defaultNow(),
+  lastSeen: timestamp('last_seen', { withTimezone: true }).notNull().defaultNow(),
+  /** Quanto l'affermazione circola nelle menzioni del progetto. */
+  circulation: jsonb('circulation').$type<Circulation>(),
+});
+
+// ---------------------------------------------------------------------------
+// Gli studi clinici (ClinicalTrials.gov).
+// ---------------------------------------------------------------------------
+export type TrialNews = {
+  total: number; last30: number; sampleIds: number[]; terms: string[]; at: string;
+  /** Le stesse misure per ciascun nome cercato (in minuscolo). */
+  byTerm?: Record<string, { total: number; last30: number; sampleIds: number[] }>;
+};
+export const clinicalTrials = pgTable('clinical_trials', {
+  id: serial('id').primaryKey(),
+  projectId: integer('project_id').notNull(),
+  nctId: text('nct_id').notNull(),
+  title: text('title').notNull(),
+  status: text('status').notNull(),
+  phases: jsonb('phases').$type<string[]>().notNull().default([]),
+  studyType: text('study_type'),
+  sponsor: text('sponsor'),
+  sponsorClass: text('sponsor_class'),
+  conditions: jsonb('conditions').$type<string[]>().notNull().default([]),
+  interventions: jsonb('interventions').$type<{ type: string; name: string }[]>().notNull().default([]),
+  enrollment: integer('enrollment'),
+  startDate: text('start_date'),
+  completionDate: text('completion_date'),
+  firstPosted: text('first_posted'),
+  lastUpdate: text('last_update'),
+  hasResults: integer('has_results').notNull().default(0),
+  countries: jsonb('countries').$type<string[]>().notNull().default([]),
+  query: text('query').notNull(),
+  /** Quanto le notizie del progetto parlano di questo studio. */
+  news: jsonb('news').$type<TrialNews>(),
+  fetchedAt: timestamp('fetched_at', { withTimezone: true }).notNull().defaultNow(),
+});

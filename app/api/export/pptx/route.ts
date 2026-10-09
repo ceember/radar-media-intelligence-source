@@ -1,0 +1,747 @@
+import { NextResponse } from 'next/server';
+import PptxGenJS from 'pptxgenjs';
+import { getCurrentProject } from '@/lib/data';
+import { briefToBlocks, collectExportData, parseExportOptions, parseStudioIds, slugify, sourceLabel, todayStamp } from '@/lib/export-data';
+import { resolveStudioBlocks } from '@/lib/studio';
+import { SOURCE_META } from '@/lib/connectors';
+import { AI_DISCLOSURE_LONG, AI_DISCLOSURE_META, AI_DISCLOSURE_SHORT } from '@/lib/ai-disclosure';
+import {
+  cannotSayTitle, channelGrid, channelTitle, competitiveGrid, competitiveTitle, findingGrid, kpiGrid, kpiTitle,
+  overallLabel, peaksLine, periodLine, reliabilityTitle,
+} from '@/lib/kpi-export';
+
+export const maxDuration = 60;
+export const dynamic = 'force-dynamic';
+
+const BG = '0A0F1F';
+const PANEL = '10172E';
+const TEXT = 'E2E8F0';
+const MUTED = '7C8CAB';
+const ACCENT = '38BDF8';
+const ENTITY_COLORS = ['38BDF8', 'A78BFA', '34D399', 'FBBF24', 'F87171', 'F472B6', '22D3EE'];
+const SENTIMENT_COLORS: Record<string, string> = {
+  positive: '34D399', neutral: '94A3B8', negative: 'F87171', 'analyzing': '475569',
+};
+
+export async function GET(req: Request) {
+  const project = await getCurrentProject();
+  if (!project) return NextResponse.json({ error: 'no project' }, { status: 404 });
+  const url = new URL(req.url);
+  const { sections, days: rangeDays } = parseExportOptions(url);
+  const has = (s: string) => sections.has(s as never);
+  const [data, studio] = await Promise.all([
+    collectExportData(project, rangeDays),
+    resolveStudioBlocks(project.id, parseStudioIds(url)),
+  ]);
+
+  const pptx = new PptxGenJS();
+  pptx.defineLayout({ name: 'WIDE', width: 13.33, height: 7.5 });
+  pptx.layout = 'WIDE';
+  pptx.author = 'Radar By Scognamiglio 2026';
+  // Marcatura leggibile da una macchina (AI Act art. 50, par. 2).
+  pptx.subject = AI_DISCLOSURE_META.subject;
+  pptx.title = `Radar — ${project.name}`;
+  pptx.defineSlideMaster({
+    title: 'DARK',
+    background: { color: BG },
+    objects: [
+      { text: { text: 'Radar · By Scognamiglio 2026', options: { x: 0.4, y: 7.05, fontSize: 10, color: MUTED } } },
+      {
+        text: {
+          text: AI_DISCLOSURE_SHORT,
+          options: { x: 0.4, y: 7.25, w: 11.4, h: 0.22, fontSize: 7, color: MUTED },
+        },
+      },
+      {
+        text: {
+          text: new Date().toLocaleDateString('en-US'),
+          options: { x: 11.9, y: 7.05, fontSize: 10, color: MUTED, align: 'right', w: 1.1 },
+        },
+      },
+    ],
+  });
+
+  // Ogni slide nasce con l'informativa nelle NOTE del relatore, oltre alla
+  // riga nel piè di pagina del master: chi apre il file la trova comunque.
+  const newSlide = () => {
+    const s = pptx.addSlide({ masterName: 'DARK' });
+    s.addNotes(AI_DISCLOSURE_LONG);
+    return s;
+  };
+
+  const titleOpts = { x: 0.5, y: 0.35, w: 12.3, h: 0.7, fontSize: 26, bold: true, color: TEXT } as const;
+
+  // ── 1. Copertina
+  const s1 = newSlide();
+  s1.addText('RADAR', { x: 0.5, y: 2.1, w: 12.3, h: 0.5, fontSize: 20, color: ACCENT, align: 'center', charSpacing: 8 });
+  s1.addText('BY SCOGNAMIGLIO 2026', { x: 0.5, y: 2.55, w: 12.3, h: 0.3, fontSize: 10, color: MUTED, align: 'center', charSpacing: 4 });
+  s1.addText(project.name, { x: 0.5, y: 2.8, w: 12.3, h: 1.1, fontSize: 48, bold: true, color: TEXT, align: 'center' });
+  s1.addText('Media intelligence report', { x: 0.5, y: 4.0, w: 12.3, h: 0.5, fontSize: 20, color: MUTED, align: 'center' });
+  s1.addText(
+    `${new Date().toLocaleDateString('en-US', { dateStyle: 'full' })}  ·  Query: ${project.keywords.join(', ')}`,
+    { x: 0.5, y: 4.6, w: 12.3, h: 0.5, fontSize: 14, color: MUTED, align: 'center' },
+  );
+
+  // ── 2. KPI
+  const kpi = data.dashboard.kpi;
+  const sentimentLabel = kpi.avgSentiment === null ? 'analyzing'
+    : kpi.avgSentiment > 0.15 ? 'positive' : kpi.avgSentiment < -0.15 ? 'negative' : 'neutral';
+  if (has('kpi')) {
+  const s2 = newSlide();
+  s2.addText('At a glance', titleOpts);
+  const kpis: [string, string][] = [
+    ['Mentions (7 days)', kpi.total7.toLocaleString('en-US')],
+    ['Avg sentiment', sentimentLabel],
+    ['Active sources', String(kpi.sources)],
+    ['Topics detected', String(data.dashboard.topTopics.length)],
+  ];
+  kpis.forEach(([label, value], i) => {
+    const x = 0.5 + i * 3.15;
+    s2.addShape('roundRect', { x, y: 1.6, w: 2.9, h: 2, fill: { color: PANEL }, line: { color: '1E2A4A' }, rectRadius: 0.08 });
+    s2.addText(label.toUpperCase(), { x: x + 0.2, y: 1.85, w: 2.5, h: 0.4, fontSize: 11, color: MUTED });
+    s2.addText(value, { x: x + 0.2, y: 2.35, w: 2.5, h: 0.9, fontSize: 30, bold: true, color: TEXT });
+  });
+  if (data.dashboard.topTopics.length) {
+    s2.addText('Top topics', { x: 0.5, y: 4.1, w: 6, h: 0.4, fontSize: 14, bold: true, color: MUTED });
+    s2.addText(
+      data.dashboard.topTopics.slice(0, 10).map((t) => `${t.topic} (${t.n})`).join('   ·   '),
+      { x: 0.5, y: 4.55, w: 12.3, h: 1.4, fontSize: 15, color: ACCENT },
+    );
+  }
+  }
+
+  // Una griglia di testo come tabella di slide: intestazione evidenziata,
+  // numeri allineati a destra (tutte le colonne tranne la prima e le ultime
+  // testuali).
+  const gridTable = (
+    slide: ReturnType<typeof newSlide>,
+    g: { headers: string[]; rows: string[][] },
+    o: { x: number; y: number; w: number; colW: number[]; fontSize?: number; textCols?: number[] },
+  ) => {
+    const fs = o.fontSize ?? 10;
+    const isText = (i: number) => i === 0 || (o.textCols ?? []).includes(i);
+    slide.addTable([
+      g.headers.map((t) => ({ text: t, options: { bold: true, color: TEXT, fill: { color: PANEL }, fontSize: fs } })),
+      ...g.rows.map((r) => r.map((t, i) => ({
+        text: t, options: { color: TEXT, fontSize: fs, align: (isText(i) ? 'left' : 'right') as 'left' | 'right' },
+      }))),
+    ], { x: o.x, y: o.y, w: o.w, colW: o.colW, border: { type: 'solid', color: '1E2A4A', pt: 1 } });
+  };
+
+  if (has('topics') && data.dashboard.topTopics.length) {
+    const topics = data.dashboard.topTopics;
+    for (let offset = 0; offset < topics.length; offset += 12) {
+      const slide = newSlide();
+      slide.addText(`Top topics (7 days)${offset ? ' — continued' : ''}`, titleOpts);
+      gridTable(slide, { headers: ['Topic', 'Mentions'], rows: topics.slice(offset, offset + 12).map((t) => [t.topic, String(t.n)]) },
+        { x: 0.5, y: 1.4, w: 12.3, colW: [10, 2.3], fontSize: 14 });
+    }
+  }
+  if (has('mentions')) {
+    for (const m of data.allMentions) {
+      const chunks = (m.content || '').match(/[\s\S]{1,1800}/g) ?? [''];
+      chunks.forEach((text, i) => {
+        const slide = newSlide();
+        slide.addText(`${m.title || 'Untitled mention'}${i ? ' — continued' : ''}`, { ...titleOpts, fontSize: 22 });
+        slide.addText(`${m.publishedAt.toISOString()} · ${sourceLabel(m.source)} · ${m.authorHandle ?? m.author ?? ''} · ${m.sentiment ?? 'awaiting analysis'}`,
+          { x: 0.5, y: 1.1, w: 12.3, h: 0.5, fontSize: 11, color: MUTED });
+        slide.addText(text, { x: 0.5, y: 1.8, w: 12.3, h: 4.6, fontSize: 14, color: TEXT, valign: 'top', fit: 'shrink' });
+        if (m.url) slide.addText(m.url, { x: 0.5, y: 6.45, w: 12.3, h: 0.4, fontSize: 10, color: ACCENT, hyperlink: { url: m.url } });
+      });
+    }
+  }
+
+  // ── KPI standard
+  if (has('kpiStandard') && data.standard.raw.cur.n > 0) {
+    const k = data.standard;
+    const sk = newSlide();
+    sk.addText(kpiTitle(k.lang), titleOpts);
+    sk.addText(periodLine(k), { x: 0.5, y: 0.95, w: 12.3, h: 0.3, fontSize: 10, color: MUTED });
+    const g = kpiGrid(k, data.reliability);
+    // L'affidabilità qui è solo l'etichetta: il motivo sta nella slide dedicata.
+    const rows = g.rows.map((r) => [...r.slice(0, 5), r[5].split(' — ')[0]]);
+    gridTable(sk, { headers: g.headers, rows }, { x: 0.5, y: 1.35, w: 12.3, colW: [4.3, 1.7, 1.7, 1.4, 1.2, 2.0], fontSize: 9, textCols: [5] });
+
+    if (k.channels.length || k.competitive.length) {
+      const sc = newSlide();
+      sc.addText(channelTitle(k.lang), titleOpts);
+      let y = 1.2;
+      if (k.channels.length) {
+        const ch = channelGrid(k);
+        const rowsCh = ch.rows.slice(0, 8);
+        gridTable(sc, { headers: ch.headers, rows: rowsCh }, { x: 0.5, y, w: 12.3, colW: [2.3, 1.2, 1.2, 1.4, 1.4, 1.2, 1.2, 1.1, 1.3], fontSize: 10 });
+        y += 0.32 * (rowsCh.length + 1) + 0.3;
+      }
+      const peaks = peaksLine(k);
+      if (peaks) { sc.addText(peaks, { x: 0.5, y, w: 12.3, h: 0.4, fontSize: 11, color: MUTED }); y += 0.5; }
+      if (k.competitive.length && y < 5.4) {
+        sc.addText(competitiveTitle(k.lang), { x: 0.5, y, w: 12.3, h: 0.35, fontSize: 13, bold: true, color: MUTED });
+        const cg = competitiveGrid(k);
+        gridTable(sc, { headers: cg.headers, rows: cg.rows.slice(0, Math.max(1, Math.floor((6.8 - y - 0.4) / 0.32) - 1)) },
+          { x: 0.5, y: y + 0.4, w: 12.3, colW: [3.3, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5], fontSize: 10 });
+      }
+    }
+  }
+
+  // ── Affidabilità dei dati (L1)
+  if (has('reliability') && data.standard.raw.cur.n > 0) {
+    const r = data.reliability;
+    const lang = data.standard.lang;
+    const sr = newSlide();
+    sr.addText(reliabilityTitle(lang), titleOpts);
+    const col = r.overall === 'suitable' ? '34D399' : r.overall === 'caution' ? 'FBBF24' : 'F87171';
+    sr.addText(`${overallLabel(r, lang)} — ${r.overallReason}`, { x: 0.5, y: 1.05, w: 12.3, h: 0.45, fontSize: 16, bold: true, color: col });
+    let y = 1.6;
+    if (r.cannotSay.length) {
+      sr.addText(cannotSayTitle(lang), { x: 0.5, y, w: 12.3, h: 0.35, fontSize: 13, bold: true, color: MUTED });
+      sr.addText(r.cannotSay.map((c) => ({ text: c, options: { bullet: true, breakLine: true } })),
+        { x: 0.5, y: y + 0.35, w: 12.3, h: 0.34 * r.cannotSay.length + 0.1, fontSize: 11, color: TEXT, valign: 'top' });
+      y += 0.45 + 0.34 * r.cannotSay.length + 0.15;
+    }
+    if (r.findings.length) {
+      const g = findingGrid(r, lang);
+      // Osservazione, evidenza e verifica: il "perché" e la confidenza restano
+      // nel documento, in una slide non ci stanno senza diventare illeggibili.
+      const pick = (row: string[]) => [row[0], row[1], row[4]];
+      const maxRows = Math.max(1, Math.floor((6.8 - y) / 0.62) - 1);
+      gridTable(sr, { headers: pick(g.headers), rows: g.rows.slice(0, maxRows).map(pick) },
+        { x: 0.5, y, w: 12.3, colW: [3.6, 4.7, 4.0], fontSize: 9, textCols: [1, 2] });
+    }
+  }
+
+  // ── Health Index (market + brand + confronto)
+  if (has('health') && data.health.theme.total > 0) {
+    const gcol = (v: number) => v >= 80 ? '34D399' : v >= 65 ? '38BDF8' : v >= 50 ? 'FBBF24' : 'F87171';
+    const h = data.health;
+    const primary = h.brand ? h.brand.health : h.theme;
+    const sh = newSlide();
+    sh.addText(h.brand ? `Brand Health Index — ${h.brand.name}` : 'Market Health Index', titleOpts);
+    sh.addShape('roundRect', { x: 0.5, y: 1.6, w: 4.2, h: 4.6, fill: { color: PANEL }, line: { color: '1E2A4A' }, rectRadius: 0.1 });
+    sh.addText(String(primary.score), { x: 0.5, y: 2.3, w: 4.2, h: 1.6, fontSize: 92, bold: true, color: gcol(primary.score), align: 'center' });
+    sh.addText(primary.grade.toUpperCase(), { x: 0.5, y: 3.95, w: 4.2, h: 0.5, fontSize: 20, bold: true, color: gcol(primary.score), align: 'center', charSpacing: 2 });
+    sh.addText(h.brand ? `Market health: ${h.theme.score}  (${primary.score - h.theme.score >= 0 ? '+' : ''}${primary.score - h.theme.score} vs market)` : `${h.theme.total.toLocaleString('en-US')} mentions · 14 days`,
+      { x: 0.5, y: 4.6, w: 4.2, h: 0.5, fontSize: 12, color: MUTED, align: 'center' });
+    sh.addChart('bar', [{
+      name: 'Score',
+      labels: primary.components.map((c) => c.label),
+      values: primary.components.map((c) => c.value),
+    }], {
+      x: 5.1, y: 1.6, w: 7.7, h: 4.6, barDir: 'bar',
+      chartColors: primary.components.map((c) => gcol(c.value)),
+      catAxisLabelColor: TEXT, valAxisLabelColor: MUTED, showLegend: false,
+      valAxisMinVal: 0, valAxisMaxVal: 100, valGridLine: { color: '1E2A4A' }, catGridLine: { style: 'none' },
+    });
+    if (h.compare.length > 1) {
+      const sc = newSlide();
+      sc.addText('Health ranking — your brand vs competitors', titleOpts);
+      sc.addChart('bar', [{
+        name: 'Health score',
+        labels: h.compare.map((c) => c.name),
+        values: h.compare.map((c) => c.score),
+      }], {
+        x: 0.5, y: 1.3, w: 12.3, h: 5.4, barDir: 'bar',
+        chartColors: h.compare.map((c) => c.isBrand ? 'FBBF24' : gcol(c.score)),
+        catAxisLabelColor: TEXT, valAxisLabelColor: MUTED, showLegend: false,
+        valAxisMinVal: 0, valAxisMaxVal: 100, valGridLine: { color: '1E2A4A' }, catGridLine: { style: 'none' },
+      });
+    }
+  }
+
+  // ── Crisis radar & peak anatomy
+  if (has('crisis') && data.crisis.peak) {
+    const rc = data.crisis.risk >= 75 ? 'F87171' : data.crisis.risk >= 50 ? 'FB923C' : data.crisis.risk >= 25 ? 'FBBF24' : '34D399';
+    const cr = newSlide();
+    cr.addText('Crisis radar & peak anatomy', titleOpts);
+    cr.addShape('roundRect', { x: 0.5, y: 1.6, w: 4.2, h: 4.6, fill: { color: PANEL }, line: { color: '1E2A4A' }, rectRadius: 0.1 });
+    cr.addText(String(data.crisis.risk), { x: 0.5, y: 2.3, w: 4.2, h: 1.6, fontSize: 92, bold: true, color: rc, align: 'center' });
+    cr.addText(data.crisis.level.toUpperCase(), { x: 0.5, y: 3.95, w: 4.2, h: 0.5, fontSize: 20, bold: true, color: rc, align: 'center', charSpacing: 2 });
+    cr.addText('Risk index · 0–100', { x: 0.5, y: 4.6, w: 4.2, h: 0.4, fontSize: 12, color: MUTED, align: 'center' });
+    const p = data.crisis.peak;
+    cr.addText([
+      { text: `Peak day: ${p.day}\n`, options: { fontSize: 15, bold: true, color: TEXT } },
+      { text: `${p.volume} mentions · ${p.negShare}% negative · avg sentiment ${p.sentiment}\n\n`, options: { fontSize: 13, color: MUTED } },
+      { text: `Topics: ${p.topics.map((t) => `${t.topic} (${t.n})`).join(', ')}\n\n`, options: { fontSize: 13, color: ACCENT } },
+      ...p.content.map((c) => ({ text: `• ${c.title}\n`, options: { fontSize: 12, color: TEXT } })),
+    ], { x: 5.1, y: 1.7, w: 7.7, h: 4.5, valign: 'top' });
+  }
+
+  // ── Emerging trends
+  if (has('trends') && data.trends.length) {
+    const st = newSlide();
+    st.addText('Radar — emerging trends', titleOpts);
+    st.addText(
+      data.trends.slice(0, 6).map((t) => ({
+        text: `×${t.score.toFixed(0)}  ${t.topic}${t.explanation ? ` — ${t.explanation}` : ''}`,
+        options: { fontSize: 14, color: TEXT, bullet: { code: '2022' }, breakLine: true },
+      })),
+      { x: 0.5, y: 1.3, w: 12.3, h: 5.6, lineSpacing: 22, valign: 'top' },
+    );
+  }
+
+  // ── 3. Volume per fonte (barre impilate, grafico nativo)
+  const days = [...new Set(data.dashboard.volumeByDay.map((r) => r.day))].sort();
+  const sources = [...new Set(data.dashboard.volumeByDay.map((r) => r.source))];
+  if (has('volume') && days.length) {
+    const s3 = newSlide();
+    s3.addText('Volume by source (14 days)', titleOpts);
+    s3.addChart('bar', sources.map((src) => ({
+      name: sourceLabel(src),
+      labels: days.map((d) => d.slice(5)),
+      values: days.map((d) => Number(data.dashboard.volumeByDay.find((r) => r.day === d && r.source === src)?.n ?? 0)),
+    })), {
+      x: 0.5, y: 1.3, w: 12.3, h: 5.6,
+      barGrouping: 'stacked', chartColors: sources.map((s) => (SOURCE_META[s]?.color ?? '#64748b').replace('#', '')),
+      catAxisLabelColor: MUTED, valAxisLabelColor: MUTED, legendPos: 'b',
+      showLegend: true, legendColor: MUTED, valGridLine: { color: '1E2A4A' }, catGridLine: { style: 'none' },
+    });
+  }
+
+  // ── 4. Sentiment (torta nativa)
+  if (has('sentiment') && data.dashboard.sentimentDist.length) {
+    const s4 = newSlide();
+    s4.addText('Sentiment (7 days)', titleOpts);
+    s4.addChart('doughnut', [{
+      name: 'Sentiment',
+      labels: data.dashboard.sentimentDist.map((r) => r.sentiment),
+      values: data.dashboard.sentimentDist.map((r) => r.n),
+    }], {
+      x: 3.2, y: 1.3, w: 7, h: 5.6, holeSize: 60,
+      chartColors: data.dashboard.sentimentDist.map((r) => SENTIMENT_COLORS[r.sentiment] ?? '64748B'),
+      showLegend: true, legendPos: 'b', legendColor: MUTED, dataLabelColor: TEXT, showValue: true,
+    });
+  }
+
+  // ── 4·constellation. Semantic constellation
+  if (has('constellation') && data.constellation.nodes.length) {
+    const sc = newSlide();
+    sc.addText('Semantic constellation — key terms & co-occurrence', titleOpts);
+    const top = data.constellation.nodes.slice(0, 14);
+    sc.addChart('bar', [{
+      name: 'Frequency',
+      labels: top.map((n) => n.term),
+      values: top.map((n) => n.freq),
+    }], {
+      x: 0.5, y: 1.3, w: 7.4, h: 5.4, barDir: 'bar',
+      chartColors: top.map((n) => n.sentiment > 0.15 ? '34D399' : n.sentiment < -0.15 ? 'F87171' : '94A3B8'),
+      catAxisLabelColor: TEXT, valAxisLabelColor: MUTED, showLegend: false,
+      valGridLine: { color: '1E2A4A' }, catGridLine: { style: 'none' },
+    });
+    if (data.constellation.edges.length) {
+      sc.addText('Strongest links', { x: 8.1, y: 1.3, w: 4.7, h: 0.4, fontSize: 14, bold: true, color: MUTED });
+      sc.addTable([
+        ['A + B', 'n'].map((t) => ({ text: t, options: { bold: true, color: TEXT, fill: { color: PANEL }, fontSize: 12 } })),
+        ...data.constellation.edges.slice(0, 12).map((e) => [
+          { text: `${e.a} + ${e.b}`, options: { color: TEXT, fontSize: 11 } },
+          { text: String(e.weight), options: { color: TEXT, fontSize: 11, align: 'right' as const } },
+        ]),
+      ], { x: 8.1, y: 1.8, w: 4.7, colW: [3.9, 0.8], border: { type: 'solid', color: '1E2A4A', pt: 1 } });
+    }
+  }
+
+  // ── 4·pyramid. Author influence pyramid
+  if (has('pyramid') && data.pyramid.tiers.length) {
+    const sp = newSlide();
+    sp.addText('Author influence pyramid — reach concentration', titleOpts);
+    const tcol: Record<string, string> = { mega: 'FBBF24', macro: 'A78BFA', micro: '38BDF8', longtail: '64748B' };
+    sp.addChart('bar', [{
+      name: 'Share of reach %',
+      labels: data.pyramid.tiers.map((t) => `${t.label} (${t.authors})`),
+      values: data.pyramid.tiers.map((t) => t.sharePct),
+    }], {
+      x: 0.5, y: 1.3, w: 12.3, h: 5.4, barDir: 'bar',
+      chartColors: data.pyramid.tiers.map((t) => tcol[t.key] ?? '64748B'),
+      catAxisLabelColor: TEXT, valAxisLabelColor: MUTED, showLegend: false,
+      valAxisMinVal: 0, valGridLine: { color: '1E2A4A' }, catGridLine: { style: 'none' },
+    });
+  }
+
+  // ── 4·network. Influencer network (top autori)
+  if (has('network') && data.network.nodes.length) {
+    const sn = newSlide();
+    sn.addText('Influencer network — top voices by community', titleOpts);
+    const top = [...data.network.nodes].sort((a, b) => b.engagement - a.engagement).slice(0, 16);
+    sn.addTable([
+      ['Author', 'Focus topic', 'Posts', 'Engagement'].map((t) => ({ text: t, options: { bold: true, color: TEXT, fill: { color: PANEL }, fontSize: 13 } })),
+      ...top.map((n) => [
+        { text: n.label, options: { color: TEXT, fontSize: 12 } },
+        { text: n.community, options: { color: MUTED, fontSize: 12 } },
+        { text: String(n.posts), options: { color: TEXT, fontSize: 12, align: 'right' as const } },
+        { text: n.engagement.toLocaleString('en-US'), options: { color: TEXT, fontSize: 12, align: 'right' as const } },
+      ]),
+    ], { x: 0.5, y: 1.3, w: 12.3, colW: [4, 4.3, 2, 2], border: { type: 'solid', color: '1E2A4A', pt: 1 } });
+  }
+
+  // ── 4·flow. Conversation flow (tabella flussi principali)
+  if (has('flow') && data.flow.links.length) {
+    const lbl = new Map(data.flow.nodes.map((n) => [n.key, n.label]));
+    const sf = newSlide();
+    sf.addText('Conversation flow — Source → Topic → Sentiment', titleOpts);
+    const top = [...data.flow.links].sort((a, b) => b.value - a.value).slice(0, 18);
+    sf.addTable([
+      ['From', 'To', 'Mentions'].map((t) => ({ text: t, options: { bold: true, color: TEXT, fill: { color: PANEL }, fontSize: 13 } })),
+      ...top.map((l) => [
+        { text: String(lbl.get(l.source) ?? l.source), options: { color: TEXT, fontSize: 12 } },
+        { text: String(lbl.get(l.target) ?? l.target), options: { color: TEXT, fontSize: 12 } },
+        { text: String(l.value), options: { color: TEXT, fontSize: 12, align: 'right' as const } },
+      ]),
+    ], { x: 0.5, y: 1.3, w: 12.3, colW: [5.4, 5.4, 1.5], border: { type: 'solid', color: '1E2A4A', pt: 1 } });
+  }
+
+  // ── 4·momentum. Momentum quadrant
+  if (has('momentum') && data.momentum.length) {
+    const sq = newSlide();
+    sq.addText('Momentum quadrant — topics by volume × acceleration', titleOpts);
+    const qcol: Record<string, string> = { 'Rising stars': '34D399', 'Emerging': '38BDF8', 'Steady': 'A78BFA', 'Declining': 'F87171' };
+    const rows = [...data.momentum].sort((a, b) => b.volume - a.volume).slice(0, 20);
+    sq.addTable([
+      ['Topic', 'Volume', 'Acceleration', 'Quadrant'].map((t) => ({
+        text: t, options: { bold: true, color: TEXT, fill: { color: PANEL }, fontSize: 13 },
+      })),
+      ...rows.map((p) => [
+        { text: p.topic, options: { color: TEXT, fontSize: 12 } },
+        { text: String(p.volume), options: { color: TEXT, fontSize: 12, align: 'right' as const } },
+        { text: `${p.acceleration > 0 ? '+' : ''}${p.acceleration}%`, options: { color: TEXT, fontSize: 12, align: 'right' as const } },
+        { text: p.quadrant, options: { color: qcol[p.quadrant] ?? 'CBD5E1', bold: true, fontSize: 12 } },
+      ]),
+    ], { x: 0.5, y: 1.3, w: 12.3, colW: [6.3, 2, 2, 2], border: { type: 'solid', color: '1E2A4A', pt: 1 } });
+  }
+
+  // ── 4a. Emotion radar
+  if (has('emotions') && data.emotions.length) {
+    const se = newSlide();
+    se.addText('Emotion radar — emotional fingerprint (30 days)', titleOpts);
+    se.addChart('radar', [{
+      name: 'Share %',
+      labels: data.emotions.map((e) => e.emotion),
+      values: data.emotions.map((e) => e.share),
+    }], {
+      x: 1.5, y: 1.3, w: 10.3, h: 5.4,
+      chartColors: ['A78BFA'], radarStyle: 'standard',
+      catAxisLabelColor: TEXT, valAxisLabelColor: MUTED, showLegend: false,
+      lineSize: 2,
+    });
+  }
+
+  // ── 4b. Geographic map (per area/lingua)
+  if (has('geo') && data.geo.length) {
+    const s4b = newSlide();
+    s4b.addText('Geographic map — conversation by area (language-inferred)', titleOpts);
+    const geo = data.geo.slice(0, 12);
+    s4b.addChart('bar', [{
+      name: 'Mentions',
+      labels: geo.map((g) => g.country),
+      values: geo.map((g) => g.volume),
+    }], {
+      x: 0.5, y: 1.3, w: 7.5, h: 5.4, barDir: 'bar',
+      chartColors: geo.map((g) => (g.sentiment === null ? '64748B' : g.sentiment > 0.15 ? '34D399' : g.sentiment < -0.15 ? 'F87171' : '94A3B8')),
+      catAxisLabelColor: MUTED, valAxisLabelColor: MUTED, showLegend: false,
+      valGridLine: { color: '1E2A4A' }, catGridLine: { style: 'none' },
+    });
+    s4b.addTable([
+      ['Area', 'Mentions', 'Share', 'Sentiment'].map((t) => ({
+        text: t, options: { bold: true, color: TEXT, fill: { color: PANEL }, fontSize: 12 },
+      })),
+      ...geo.map((g) => [g.country, String(g.volume), `${g.share}%`, g.sentiment === null ? 'n/a' : g.sentiment.toFixed(2)]
+        .map((t) => ({ text: t, options: { color: TEXT, fontSize: 11 } }))),
+    ], { x: 8.2, y: 1.3, w: 4.6, colW: [2.2, 0.9, 0.7, 0.8], border: { type: 'solid', color: '1E2A4A', pt: 1 } });
+  }
+
+  // ── 4·sov. Share of Voice over time (area impilata)
+  if (has('sov') && data.sov.entities.length && data.sov.days.length) {
+    const ss = newSlide();
+    ss.addText('Share of Voice over time (30 days)', titleOpts);
+    const labels = data.sov.days.map((d) => String(d.day).slice(5));
+    ss.addChart('area', data.sov.entities.map((e) => ({
+      name: e,
+      labels,
+      values: data.sov.days.map((d) => Number(d[e] ?? 0)),
+    })), {
+      x: 0.5, y: 1.3, w: 12.3, h: 5.4, barGrouping: 'stacked',
+      chartColors: data.sov.entities.map((_, i) => ENTITY_COLORS[i % ENTITY_COLORS.length]),
+      catAxisLabelColor: MUTED, valAxisLabelColor: MUTED, showLegend: true, legendPos: 'b', legendColor: MUTED,
+      valGridLine: { color: '1E2A4A' }, catGridLine: { style: 'none' },
+    });
+  }
+
+  // ── 5. Share of voice
+  const totalBench = data.benchmark.reduce((s, r) => s + r.total, 0);
+  if (has('benchmark') && totalBench > 0) {
+    const s5 = newSlide();
+    s5.addText('Benchmark — share of voice (14 days)', titleOpts);
+    s5.addChart('pie', [{
+      name: 'Share of voice',
+      labels: data.benchmark.map((r) => r.entity.name),
+      values: data.benchmark.map((r) => r.total),
+    }], {
+      x: 0.5, y: 1.4, w: 6.2, h: 5.3,
+      chartColors: data.benchmark.map((_, i) => ENTITY_COLORS[i % ENTITY_COLORS.length]),
+      showLegend: true, legendPos: 'b', legendColor: MUTED, dataLabelColor: TEXT, showPercent: true,
+    });
+    s5.addTable([
+      ['Entity', 'Mentions', 'SOV', 'Sentiment'].map((t) => ({
+        text: t, options: { bold: true, color: TEXT, fill: { color: PANEL }, fontSize: 13 },
+      })),
+      ...data.benchmark.map((r) => [
+        { text: r.entity.name, options: { color: TEXT, fontSize: 12 } },
+        { text: String(r.total), options: { color: TEXT, fontSize: 12 } },
+        { text: `${((r.total / totalBench) * 100).toFixed(1)}%`, options: { color: TEXT, fontSize: 12 } },
+        { text: r.avgSentiment === null ? '—' : r.avgSentiment.toFixed(2), options: { color: TEXT, fontSize: 12 } },
+      ]),
+    ], { x: 7.2, y: 1.8, w: 5.6, colW: [2.2, 1.1, 1.1, 1.2], border: { color: '1E2A4A' }, fill: { color: BG } });
+  }
+
+  // ── 6. Audience
+  if (has('audience') && data.audience.communities.length) {
+    const s6 = newSlide();
+    s6.addText('Audience — where the conversation happens', titleOpts);
+    s6.addChart('bar', [{
+      name: 'Mentions',
+      labels: data.audience.communities.slice(0, 8).map((c) => c.community ?? '—'),
+      values: data.audience.communities.slice(0, 8).map((c) => c.n),
+    }], {
+      x: 0.5, y: 1.3, w: 6.4, h: 5.6, barDir: 'bar',
+      chartColors: [ACCENT], catAxisLabelColor: MUTED, valAxisLabelColor: MUTED,
+      showLegend: false, valGridLine: { color: '1E2A4A' }, catGridLine: { style: 'none' },
+    });
+    s6.addText('Languages', { x: 7.3, y: 1.4, w: 5.5, h: 0.4, fontSize: 14, bold: true, color: MUTED });
+    s6.addText(
+      data.audience.languages.map((l) => `${l.language.toUpperCase()} (${l.n})`).join('  ·  ') || '—',
+      { x: 7.3, y: 1.85, w: 5.5, h: 1.2, fontSize: 13, color: TEXT },
+    );
+    s6.addText('Most influential authors', { x: 7.3, y: 3.2, w: 5.5, h: 0.4, fontSize: 14, bold: true, color: MUTED });
+    s6.addText(
+      data.audience.authors.slice(0, 8).map((a) => `${a.author} — ${sourceLabel(a.source)}`).join('\n') || '—',
+      { x: 7.3, y: 3.65, w: 5.5, h: 3, fontSize: 12, color: TEXT, lineSpacing: 18 },
+    );
+  }
+
+  // ── 7. Contenuti top
+  if (has('content') && data.ratings.length) {
+    const s7 = newSlide();
+    s7.addText('Top content by engagement', titleOpts);
+    s7.addTable([
+      ['Content', 'Source', 'Engagement', 'AI score', 'Risk'].map((t) => ({
+        text: t, options: { bold: true, color: TEXT, fill: { color: PANEL }, fontSize: 12 },
+      })),
+      ...data.ratings.slice(0, 9).map((r) => [
+        { text: (r.title || r.content).slice(0, 80), options: { color: TEXT, fontSize: 11 } },
+        { text: sourceLabel(r.source), options: { color: TEXT, fontSize: 11 } },
+        { text: String(Math.round(r.engagementScore)), options: { color: TEXT, fontSize: 11 } },
+        { text: r.quality ? String(r.quality.score) : '—', options: { color: TEXT, fontSize: 11 } },
+        { text: r.quality?.risk ?? '—', options: { color: r.quality?.risk === 'high' ? 'F87171' : TEXT, fontSize: 11 } },
+      ]),
+    ], { x: 0.5, y: 1.3, w: 12.3, colW: [7.1, 1.6, 1.4, 1.1, 1.1], border: { color: '1E2A4A' }, autoPage: false });
+  }
+
+  // ── Point of View: una slide per blocco (titolo, narrativa, numeri)
+  if (has('pov') && data.pov.pov) {
+    const pv = data.pov.pov;
+    const KIND_COLOR: Record<string, string> = {
+      trend: ACCENT, innovation: 'A78BFA', concept: '22D3EE', risk: 'F87171', opportunity: '34D399',
+    };
+    // Slide di apertura con la tesi
+    const st0 = newSlide();
+    st0.addText('Point of View', { x: 0.5, y: 2.4, w: 12.3, h: 0.5, fontSize: 16, color: ACCENT, align: 'center', charSpacing: 4 });
+    st0.addText(pv.headline, { x: 1.2, y: 2.4, w: 10.9, h: 1.6, fontSize: 30, bold: true, color: TEXT, align: 'center' });
+    if ((pv.intro ?? []).length) {
+      st0.addText(pv.intro.map((par) => par.text).join('\n\n'),
+        { x: 1.6, y: 4.1, w: 10.1, h: 2.4, fontSize: 13, color: MUTED, align: 'center', lineSpacing: 20, valign: 'top' });
+    }
+
+    for (const [i, b] of pv.blocks.entries()) {
+      const s = newSlide();
+      const kc = KIND_COLOR[b.kind] ?? ACCENT;
+      s.addText(b.kind.toUpperCase(), { x: 0.5, y: 0.35, w: 6, h: 0.3, fontSize: 11, color: kc, charSpacing: 3 });
+      s.addText(`${String(i + 1).padStart(2, '0')}`, { x: 11.8, y: 0.35, w: 1, h: 0.4, fontSize: 14, color: MUTED, align: 'right' });
+      s.addText(b.title, { x: 0.5, y: 0.75, w: 12.3, h: 1, fontSize: 30, bold: true, color: TEXT });
+      s.addText(b.body, { x: 0.5, y: 1.95, w: 12.3, h: 2.6, fontSize: 15, color: TEXT, lineSpacing: 24, valign: 'top' });
+
+      // Riquadri numerici a sostegno
+      b.stats.slice(0, 3).forEach((stat, k) => {
+        const x = 0.5 + k * 4.25;
+        s.addShape('roundRect', { x, y: 4.75, w: 3.95, h: 1.6, fill: { color: PANEL }, line: { color: '1E2A4A' }, rectRadius: 0.08 });
+        s.addText(stat.value, { x: x + 0.25, y: 4.95, w: 3.45, h: 0.75, fontSize: 30, bold: true, color: kc });
+        s.addText(stat.label, { x: x + 0.25, y: 5.7, w: 3.45, h: 0.55, fontSize: 11, color: MUTED });
+      });
+      s.addText(`${b.confidence} confidence`, { x: 0.5, y: 6.5, w: 6, h: 0.3, fontSize: 10, color: MUTED });
+    }
+
+    // Contro-segnali + implicazioni
+    if (pv.counterSignals.length || pv.implications.length) {
+      const sc = newSlide();
+      sc.addText('Counter-signals & implications', titleOpts);
+      if (pv.counterSignals.length) {
+        sc.addText('What argues against', { x: 0.5, y: 1.3, w: 6, h: 0.35, fontSize: 14, bold: true, color: 'FBBF24' });
+        sc.addText(pv.counterSignals.map((c) => ({
+          text: c.point, options: { fontSize: 13, color: TEXT, bullet: { code: '2022' }, breakLine: true },
+        })), { x: 0.5, y: 1.75, w: 6, h: 4.6, lineSpacing: 20, valign: 'top' });
+      }
+      if (pv.implications.length) {
+        sc.addText('So what', { x: 6.9, y: 1.3, w: 6, h: 0.35, fontSize: 14, bold: true, color: ACCENT });
+        sc.addText(pv.implications.map((t) => ({
+          text: t, options: { fontSize: 13, color: TEXT, bullet: { code: '2022' }, breakLine: true },
+        })), { x: 6.9, y: 1.75, w: 6, h: 4.6, lineSpacing: 20, valign: 'top' });
+      }
+    }
+  }
+
+  // ── Narrazioni
+  if (has('narratives') && data.narratives.length) {
+    const sn = newSlide();
+    sn.addText('Narratives', titleOpts);
+    sn.addText(
+      data.narratives.slice(0, 6).map((n) => ({
+        text: `${n.title}  [${n.stance ?? 'neutral'}${n.coordinated ? ', coordinated' : ''}] · ${n.mentionCount} posts`,
+        options: { fontSize: 14, color: TEXT, bullet: { code: '2022' }, breakLine: true },
+      })),
+      { x: 0.5, y: 1.3, w: 12.3, h: 5.6, lineSpacing: 22, valign: 'top' },
+    );
+  }
+
+  // ── Timeline
+  if (has('timeline') && data.timeline.length) {
+    const stl = newSlide();
+    stl.addText('Sector timeline', titleOpts);
+    stl.addText(
+      data.timeline.slice(0, 12).map((e) => ({
+        text: `${new Date(e.eventDate).toLocaleDateString('en-US')} — ${e.title}`,
+        options: { fontSize: 13, color: TEXT, bullet: { code: '2022' }, breakLine: true },
+      })),
+      { x: 0.5, y: 1.3, w: 12.3, h: 5.6, lineSpacing: 20, valign: 'top' },
+    );
+  }
+
+  // ── Alerts
+  if (has('alerts') && data.alerts.length) {
+    const sa = newSlide();
+    sa.addText('Recent alerts', titleOpts);
+    sa.addText(
+      data.alerts.slice(0, 8).map((a) => {
+        const ex = (a.data as { explanation?: string } | null)?.explanation;
+        return {
+          text: `[${new Date(a.createdAt).toLocaleDateString('en-US')}] ${a.message}${ex ? ` — ${ex}` : ''}`,
+          options: { fontSize: 13, color: TEXT, bullet: { code: '2022' }, breakLine: true },
+        };
+      }),
+      { x: 0.5, y: 1.3, w: 12.3, h: 5.6, lineSpacing: 20, valign: 'top' },
+    );
+  }
+
+  // ── 8. Brief
+  if (has('brief') && data.briefs[0]) {
+    const s8 = newSlide();
+    s8.addText(`Daily brief — ${new Date(data.briefs[0].briefDate).toLocaleDateString('en-US')}`, titleOpts);
+    const lines = briefToBlocks(data.briefs[0].content).slice(0, 18).map((b) => ({
+      text: b.text,
+      options: {
+        fontSize: b.type === 'h2' ? 15 : 12,
+        bold: b.type === 'h2',
+        color: b.type === 'h2' ? ACCENT : TEXT,
+        bullet: b.type === 'bullet' ? { code: '2022' } : false,
+        breakLine: true,
+      },
+    }));
+    s8.addText(lines, { x: 0.5, y: 1.3, w: 12.3, h: 5.7, lineSpacing: 16, valign: 'top' });
+  }
+
+  // ── Persone (personal branding): una slide di classifica e una di crescita.
+  const ppl = data.people;
+  if (has('people') && ppl.ranking.length > 1) {
+    const sp = newSlide();
+    sp.addText('People — the team at a glance', titleOpts);
+    sp.addTable(
+      [
+        ['Person', 'Audience', 'Posts / month', 'Avg engagement'].map((t) => ({
+          text: t, options: { bold: true, color: TEXT, fill: { color: PANEL } },
+        })),
+        ...ppl.ranking.slice(0, 12).map((r) => [
+          r.name,
+          r.followers === null ? '—' : r.followers.toLocaleString('en-US'),
+          r.perMonth === null ? '—' : String(r.perMonth),
+          r.engagement === null ? '—' : String(Math.round(r.engagement)),
+        ].map((t) => ({ text: t, options: { color: TEXT } }))),
+      ],
+      { x: 0.5, y: 1.4, w: 12.3, fontSize: 12, border: { pt: 1, color: '1E2A4A' }, align: 'left' },
+    );
+  }
+  if (has('peopleGrowth') && ppl.cards.some((x) => x.followers)) {
+    const sg2 = newSlide();
+    sg2.addText('Audience growth per person', titleOpts);
+    const rows = ppl.cards.filter((x) => x.followers)
+      .sort((a, b) => b.followers!.gained - a.followers!.gained).slice(0, 12);
+    const max = Math.max(1, ...rows.map((x) => Math.abs(x.followers!.gained)));
+    const rowH = Math.min(0.42, 5.2 / Math.max(1, rows.length));
+    rows.forEach((x, i) => {
+      const y = 1.5 + i * rowH;
+      sg2.addText(x.name, { x: 0.5, y, w: 3.9, h: rowH, fontSize: 11, color: TEXT, valign: 'middle' });
+      sg2.addShape('roundRect', {
+        x: 4.5, y: y + rowH * 0.22, w: Math.max(0.08, (Math.abs(x.followers!.gained) / max) * 6.6), h: rowH * 0.56,
+        fill: { color: x.followers!.gained >= 0 ? '34D399' : 'F87171' }, rectRadius: 0.03, line: { color: BG, width: 0 },
+      });
+      sg2.addText(`${x.followers!.gained >= 0 ? '+' : ''}${x.followers!.gained.toLocaleString('en-US')}  ·  now ${x.followers!.latest.toLocaleString('en-US')}`,
+        { x: 11.1, y, w: 1.8, h: rowH, fontSize: 10, color: MUTED, align: 'right', valign: 'middle' });
+    });
+  }
+
+  if (has('peopleDetail')) {
+    for (const c of ppl.cards) {
+      const slide = newSlide();
+      slide.addText(c.name, titleOpts);
+      const lines: string[] = [];
+      if (c.followers) lines.push(`${c.followers.latest.toLocaleString('en-US')} followers (${c.followers.gained >= 0 ? '+' : ''}${c.followers.gained.toLocaleString('en-US')} between ${c.followers.from} and ${c.followers.to})`);
+      if (c.rhythm) lines.push(`${c.rhythm.perMonth} posts/month over ${c.rhythm.months} months${c.rhythm.trend !== null ? ` (${c.rhythm.trend >= 0 ? '+' : ''}${c.rhythm.trend}%)` : ''}`);
+      for (const a of c.averages) lines.push(`${a.metric}: ${a.value}`);
+      for (const f of c.formats) lines.push(`${f.name}: avg engagement ${f.avgEngagement} over ${f.posts} posts`);
+      for (const a of c.audience) lines.push(`Audience by ${a.dimension}: ${a.rows.map((r) => `${r.name} ${(r.share * 100).toFixed(0)}%`).join(', ')}`);
+      if (c.best) lines.push(`Best content: ${c.best.title} (${c.best.engagement}, ${c.best.date})`);
+      if (c.worst) lines.push(`Lowest engagement: ${c.worst.title} (${c.worst.engagement}, ${c.worst.date})`);
+      slide.addText(lines.length ? lines.join('\n\n') : 'No person metrics available in this period.',
+        { x: 0.5, y: 1.4, w: 12.3, h: 5.3, fontSize: 14, color: TEXT, valign: 'top', fit: 'shrink' });
+    }
+  }
+
+  // ── I grafici costruiti in Studio Graph: una slide per ciascuno, a barre.
+  // Su una slide contano i pochi valori che si leggono da lontano, non tutti.
+  for (const chart of studio.values()) {
+    const sg = newSlide();
+    sg.addText(chart.title, titleOpts);
+    sg.addText(
+      `${chart.yLabel} per ${chart.xLabel}${chart.zLabel ? `, diviso per ${chart.zLabel}` : ''}  ·  ultimi ${chart.days} giorni`,
+      { x: 0.5, y: 1.05, w: 12.3, h: 0.35, fontSize: 12, color: MUTED },
+    );
+    if (!chart.rows.length) {
+      sg.addText('Nessun dato con questi campi nel periodo del grafico.',
+        { x: 0.5, y: 2.5, w: 12.3, h: 0.5, fontSize: 16, color: MUTED });
+      continue;
+    }
+    // Con più serie i valori dello stesso X si sommano: una slide non regge
+    // otto colori impilati, e il totale resta la lettura corretta.
+    const byX = new Map<string, number>();
+    for (const r of chart.rows) byX.set(r.x, (byX.get(r.x) ?? 0) + r.y);
+    const top = [...byX.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12);
+    const max = Math.max(1, ...top.map(([, v]) => v));
+    const rowH = Math.min(0.42, 5.2 / top.length);
+    top.forEach(([label, value], i) => {
+      const y = 1.6 + i * rowH;
+      sg.addText(label, { x: 0.5, y, w: 3.9, h: rowH, fontSize: 11, color: TEXT, valign: 'middle' });
+      sg.addShape('roundRect', {
+        x: 4.5, y: y + rowH * 0.22, w: Math.max(0.08, (value / max) * 6.6), h: rowH * 0.56,
+        fill: { color: ENTITY_COLORS[i % ENTITY_COLORS.length] }, rectRadius: 0.03, line: { color: BG, width: 0 },
+      });
+      sg.addText(Number.isInteger(value) ? value.toLocaleString('en-US') : value.toFixed(2),
+        { x: 11.3, y, w: 1.5, h: rowH, fontSize: 11, color: MUTED, align: 'right', valign: 'middle' });
+    });
+    if (byX.size > top.length) {
+      sg.addText(`Altre ${byX.size - top.length} voci non mostrate.`,
+        { x: 0.5, y: 6.6, w: 12.3, h: 0.3, fontSize: 10, color: MUTED });
+    }
+  }
+
+  const buffer = (await pptx.write({ outputType: 'nodebuffer' })) as Buffer;
+  return new NextResponse(new Uint8Array(buffer), {
+    headers: {
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      'Content-Disposition': `attachment; filename="social-radar-${slugify(project.name)}-${todayStamp()}.pptx"`,
+    },
+  });
+}

@@ -1,0 +1,455 @@
+import { sourceAllowed } from '@/lib/connector-config';
+import { eq, sql } from 'drizzle-orm';
+import { getDb, setMeta, getMeta } from '@/lib/db';
+import { backfillCountries, countryFromDomain, countryFromUrl, toCountryCode } from '@/lib/country-codes';
+import { mentions, projects, benchmarkEntities } from '@/lib/db/schema';
+import { CONNECTORS, kindOf } from '@/lib/connectors';
+import { hydrateConnectorCredentials } from '@/lib/connector-credentials';
+import type { RawMention, ListeningQuery } from '@/lib/connectors/types';
+import { compilePlan, matchesQuery, queriesMatching, validatePlan, type CompiledQuery } from '@/lib/query-plan';
+import { cleanStoredText } from '@/lib/text-clean';
+
+export type SourceStatus = Record<string, {
+  ok: boolean; count: number; error?: string; at: string;
+  /** Ultima raccolta riuscita: distingue un singhiozzo momentaneo da una fonte ferma */
+  lastOkAt?: string;
+}>;
+
+function rawEngagementScore(m: RawMention): number {
+  const e = m.engagement;
+  if (!e) return 0;
+  return (e.likes ?? 0) + 2 * (e.comments ?? 0) + 3 * (e.shares ?? 0) + (e.views ?? 0) / 200;
+}
+
+// Le entità di Benchmark (i concorrenti) NON avevano una ricerca propria: il
+// Benchmark filtrava solo le mention già raccolte dalla query del progetto,
+// quindi un concorrente compariva a zero mention a meno che le sue notizie
+// non citassero PER CASO anche uno dei termini di tema del progetto — un
+// progetto che cerca "healthcare platform, provider portal" non troverà mai
+// nulla su "Howden" a meno che un articolo non nomini entrambe le cose.
+//
+// La correzione ovvia — accodare le keyword di ogni entità ai termini OR del
+// progetto — non funziona da sola: verificato che OGNI connettore taglia la
+// lista dei termini per chiamata (2 per GitHub/YouTube, fino a 6 per GDELT/
+// NewsAPI), quindi con più di pochissimi termini extra non arriverebbero mai
+// alla vera chiamata API, tagliati via prima ancora di partire — lo stesso
+// limite morde anche la query del PROGETTO stesso, non solo i concorrenti:
+// un tema descritto con 15 termini OR ne userebbe sempre e solo i primi 2-6,
+// sempre gli stessi, ciclo dopo ciclo.
+//
+// La soluzione: più CHIAMATE invece di più termini per chiamata. Per le
+// fonti generaliste gratuite e a quota comoda (notizie e social pubblici) i
+// termini si spezzano in blocchi della dimensione che quella fonte accetta,
+// e si lancia una chiamata per blocco — così TUTTI i termini vengono
+// interrogati nello stesso ciclo, non solo i primi. Questo vale sia per la
+// query del progetto sia, aggiuntiva, per quella di ogni entità di
+// benchmark con le sue keyword (che è la vera correzione del Benchmark: un
+// concorrente ora ha una ricerca propria, non solo il filtro su ciò che il
+// progetto ha già raccolto).
+//
+// Sulle fonti a quota stretta (GitHub 10/min, Stack Exchange, arXiv, SEC
+// EDGAR, YouTube) o a pagamento (X, Instagram, Facebook, TikTok, NewsAPI,
+// LinkedIn) NON si moltiplicano le chiamate: lì si resta a una chiamata sola
+// con i primi termini, ruotati ad ogni ciclo (stesso principio, più lento ma
+// senza rischiare di esaurire una quota o una spesa a pagamento in un colpo
+// solo). Il filtro AND del progetto non si applica alle ricerche di
+// un'entità (un vincolo pensato per il tema del progetto non ha senso per un
+// concorrente), il filtro NOT sì (tiene fuori il rumore anche dalle notizie
+// di un concorrente).
+const CONNECTOR_TERM_CAP: Partial<Record<string, number>> = {
+  gdelt: 6, reddit: 5, bluesky: 4, mastodon: 4, newsapi: 6,
+  arxiv: 3, github: 2, 'sec-edgar': 3, stackexchange: 3, x: 5, tiktok: 5, youtube: 2,
+  // Talkwalker accetta 50 operandi per query: con 40 termini OR resta spazio
+  // per gli AND e i NOT del progetto, e di solito basta una chiamata sola.
+  talkwalker: 40,
+};
+// Fonti su cui è sicuro spezzare in più chiamate per coprire tutti i
+// termini nello stesso ciclo: gratuite, senza quota stretta.
+// Talkwalker è a pagamento ma sta qui lo stesso: la sua query regge tutti i
+// termini in una volta, quindi "spezzare" significa comunque una chiamata sola
+// (10 credits + 1 per risultato) invece di ruotare le parole e vedere ogni
+// ciclo un pezzo diverso del tema.
+const BATCH_FULLY: Set<string> = new Set(['googlenews', 'gdelt', 'reddit', 'bluesky', 'mastodon', 'talkwalker']);
+// Sottoinsieme usato per la ricerca-concorrente: GDELT escluso apposta.
+// Verificato dal vivo che fallisce sempre con 429 su una richiesta ogni
+// entità (una quota giornaliera già stretta, saturata subito da una dozzina
+// di ricerche) — ogni tentativo fallito comunque aspetta il timeout (15s)
+// prima di arrendersi, e su un progetto con molte entità questo da solo
+// spingeva il tempo totale oltre il limite della funzione serverless (300s).
+// Resta pieno per la query del progetto (BATCH_FULLY), solo qui si toglie.
+const ENTITY_SEARCH_CONNECTORS: Set<string> = new Set(['googlenews', 'reddit', 'bluesky', 'mastodon']);
+
+// ---------------------------------------------------------------------------
+// Budget Talkwalker.
+//
+// Il contratto dà 20.000 credits al mese con un tetto di 1.000 al giorno, e
+// ogni ricerca costa 10 credits più 1 per risultato. Con quei numeri un dito
+// pesante sul pulsante "Aggiorna ora" può bruciare l'allowance di una giornata
+// in pochi minuti: qui si tiene il conto e, esaurito il budget, i progetti
+// Talkwalker saltano l'ingestion invece di spendere.
+//
+// Il conto è una STIMA basata sul listino pubblicato: il saldo vero sta nel
+// contratto, e questo serve solo a non arrivarci sopra per distrazione.
+// ---------------------------------------------------------------------------
+const TALKWALKER_COST_PER_CALL = 10;
+const talkwalkerBudgetKey = () => `talkwalker_credits_${new Date().toISOString().slice(0, 10)}`;
+
+function talkwalkerDailyBudget(): number {
+  const raw = Number(process.env.TALKWALKER_DAILY_CREDITS ?? 1000);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 1000;
+}
+
+async function talkwalkerCreditsSpentToday(): Promise<number> {
+  return (await getMeta<number>(talkwalkerBudgetKey())) ?? 0;
+}
+
+async function addTalkwalkerCredits(spent: number): Promise<void> {
+  if (spent <= 0) return;
+  await setMeta(talkwalkerBudgetKey(), (await talkwalkerCreditsSpentToday()) + spent);
+}
+
+function chunk<T>(arr: T[], size: number): T[][] {
+  if (arr.length === 0) return [];
+  if (!Number.isFinite(size) || size >= arr.length) return [arr];
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+// Sulle fonti a quota stretta, invece di spezzare (rischioso), si ruota la
+// finestra di termini usata ad ogni ingest (offset salvato in meta) così,
+// nell'arco di alcuni cicli, tutti i termini passano almeno una volta.
+const ROTATION_STEP = 4;
+async function rotateTerms(terms: string[], key: string): Promise<string[]> {
+  if (terms.length < 2) return terms;
+  const offset = (await getMeta<number>(key)) ?? 0;
+  const pos = offset % terms.length;
+  await setMeta(key, offset + ROTATION_STEP);
+  return [...terms.slice(pos), ...terms.slice(0, pos)];
+}
+
+type Job = {
+  connectorId: string; fetch: () => Promise<RawMention[]>;
+  scope: 'project' | 'entity' | 'query';
+  label?: string;
+  /** Per le query del piano: quale query ha prodotto questi risultati. */
+  query?: CompiledQuery;
+};
+
+// Con un piano d'ascolto le query sono fino a otto. Sulle fonti a quota
+// stretta, otto ricerche per giro moltiplicherebbero le richieste per otto:
+// lì le query si alternano, poche per volta, e nell'arco di qualche giro
+// passano tutte. Le fonti generose le fanno tutte a ogni giro.
+const QUERIES_PER_RUN_ON_TIGHT = 2;
+async function rotateQueries(list: CompiledQuery[], key: string): Promise<CompiledQuery[]> {
+  if (list.length <= QUERIES_PER_RUN_ON_TIGHT) return list;
+  const offset = (await getMeta<number>(key)) ?? 0;
+  await setMeta(key, offset + QUERIES_PER_RUN_ON_TIGHT);
+  return Array.from({ length: QUERIES_PER_RUN_ON_TIGHT }, (_, i) => list[(offset + i) % list.length]);
+}
+
+// Con una ricerca per concorrente, un progetto con una dozzina di entità
+// manda facilmente 40-70 richieste alla stessa manciata di fonti generaliste.
+// Verificato dal vivo: interrogate UNA ALLA VOLTA, tutte e 12 le entità di un
+// progetto reale restituivano risultati concreti (49-496 ciascuna). Ma in
+// produzione, sparate tutte insieme con Promise.allSettled, solo 3 su 12
+// portavano dati — la stessa manciata di fonti gratuite riceveva decine di
+// richieste nello stesso istante e la maggior parte veniva respinta (GDELT
+// falliva già da sola con 429; le altre reggono bene una alla volta ma non a
+// raffica). La correzione non è tornare a farle in sequenza (troppo lento con
+// molte entità) ma limitare quante richieste PER LA STESSA FONTE partono
+// insieme — fonti diverse restano comunque parallele fra loro.
+const CONCURRENCY_PER_CONNECTOR = 2;
+// Non basta limitare QUANTE partono insieme se poi si susseguono senza
+// pausa: un limite tipico "N richieste al minuto" si esaurisce comunque in
+// pochi secondi a raffica continua. Verificato dal vivo un pattern a finestra
+// — le entità dal 5° al 9° posto fallivano sistematicamente mentre le prime
+// 4 e le ultime 3 andavano a buon fine, coerente con una quota che si
+// esaurisce a metà lista e si libera di nuovo prima della fine. Una piccola
+// pausa fra un round e il successivo mantiene il RITMO delle richieste sotto
+// la soglia, non solo il numero in volo in un dato istante.
+const ROUND_DELAY_MS = 400;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function runJobs(jobs: Job[]): Promise<{ job: Job; mentions: RawMention[]; error?: unknown }[]> {
+  const byConnector = new Map<string, Job[]>();
+  for (const j of jobs) {
+    if (!byConnector.has(j.connectorId)) byConnector.set(j.connectorId, []);
+    byConnector.get(j.connectorId)!.push(j);
+  }
+  const perConnector = await Promise.all(
+    [...byConnector.values()].map(async (group) => {
+      const out: { job: Job; mentions: RawMention[]; error?: unknown }[] = [];
+      for (let i = 0; i < group.length; i += CONCURRENCY_PER_CONNECTOR) {
+        if (i > 0) await sleep(ROUND_DELAY_MS);
+        const batch = group.slice(i, i + CONCURRENCY_PER_CONNECTOR);
+        const settled = await Promise.allSettled(batch.map((j) => j.fetch()));
+        settled.forEach((s, k) => {
+          const job = batch[k];
+          // Log per singola chiamata: quanti risultati GREZZI ha restituito
+          // quella fonte per quella ricerca, prima di ogni filtro e della
+          // deduplica. Senza questo, "5 nuove mention" in coda alla pipeline
+          // non distingue "la fonte non ha restituito nulla" da "erano tutte
+          // già in archivio" — due cause opposte con rimedi opposti.
+          const label = `${job.connectorId}/${job.scope}${job.label ? ` "${job.label}"` : ''}`;
+          if (s.status === 'fulfilled') console.log(`[ingest] ${label}: ${s.value.length} grezze`);
+          else console.error(`[ingest] ${label}: ERRORE ${String((s.reason as Error)?.message ?? s.reason).slice(0, 120)}`);
+          out.push(s.status === 'fulfilled'
+            ? { job, mentions: s.value }
+            : { job, mentions: [], error: s.reason });
+        });
+      }
+      return out;
+    }),
+  );
+  return perConnector.flat();
+}
+
+export async function ingestProject(project: typeof projects.$inferSelect) {
+  const db = await getDb();
+  const q: ListeningQuery = {
+    anyTerms: project.keywords,
+    allTerms: project.allTerms ?? [],
+    excludeTerms: project.excludeTerms ?? [],
+    languages: project.languages,
+    countries: project.countries ?? [],
+    rssFeeds: project.rssFeeds ?? [],
+    telegramChannels: project.telegramChannels ?? [],
+    talkwalkerProject: project.talkwalkerProject ?? undefined,
+    talkwalkerTopics: project.talkwalkerTopics ?? [],
+  };
+  const status: SourceStatus = (await getMeta<SourceStatus>('source_status')) ?? {};
+  let inserted = 0;
+
+  // Il piano d'ascolto, se il progetto ne ha uno: sostituisce la query unica
+  // a tre campi e la ricerca separata dei concorrenti.
+  const plan = project.queryPlan ? validatePlan(project.queryPlan).plan : null;
+  const compiled = plan ? compilePlan(plan) : null;
+  // In un progetto Talkwalker il piano è una lente, non una ricerca: la
+  // ricerca resta quella scritta in Talkwalker (e i suoi crediti non si
+  // toccano); il piano serve solo a etichettare i documenti arrivati.
+  const searchPlan = project.mode === 'talkwalker' ? null : compiled;
+
+  const lc = (s: string) => s.toLowerCase();
+  // Filtro booleano centralizzato: AND e NOT valgono per tutte le fonti, anche
+  // quelle la cui API non supporta gli operatori. `scope` decide se il
+  // vincolo AND del progetto si applica: non ha senso per una ricerca fatta
+  // sulle keyword di un concorrente, non del tema del progetto.
+  const matchesBoolean = (m: RawMention, scope: Job['scope'], query?: CompiledQuery) => {
+    // Le query del piano hanno la loro regola, la stessa usata per etichettare.
+    if (scope === 'query' && query) return matchesQuery(query, `${m.title ?? ''} ${m.content}`);
+    const text = lc(`${m.title ?? ''} ${m.content}`);
+    if (scope === 'project' && q.allTerms.length && !q.allTerms.every((t) => text.includes(lc(t)))) return false;
+    if (q.excludeTerms.some((t) => text.includes(lc(t)))) return false;
+    return true;
+  };
+
+  // Carica le chiavi API inserite dall'utente prima di decidere quali fonti sono attive.
+  await hydrateConnectorCredentials();
+  // Un progetto 'talkwalker' interroga SOLO Talkwalker; tutti gli altri non lo
+  // toccano mai. Le due regole sono la stessa cosa vista dai due lati: i
+  // credits del contratto aziendale si spendono dove l'utente ha deciso.
+  let enabled = CONNECTORS
+    .filter((c) => c.enabled() && sourceAllowed(c.id, c.tier))
+    .filter((c) => (project.mode === 'talkwalker' ? c.id === 'talkwalker' : c.id !== 'talkwalker'));
+
+  if (project.mode === 'talkwalker') {
+    const budget = talkwalkerDailyBudget();
+    const spent = await talkwalkerCreditsSpentToday();
+    if (budget > 0 && spent >= budget) {
+      console.log(`[ingest] Talkwalker: budget del giorno esaurito (${spent}/${budget} credits stimati), ingestion saltata`);
+      enabled = [];
+      status.talkwalker = {
+        ok: false, count: 0,
+        error: `Budget Talkwalker del giorno esaurito: ~${spent} credits su ${budget}. Riprende domani, oppure alza TALKWALKER_DAILY_CREDITS.`,
+        at: new Date().toISOString(), lastOkAt: status.talkwalker?.lastOkAt,
+      };
+      await setMeta('source_status', status);
+    }
+  }
+
+  const entities = await db.select().from(benchmarkEntities).where(eq(benchmarkEntities.projectId, project.id));
+
+  const jobs: Job[] = [];
+  if (searchPlan) {
+    for (const c of enabled) {
+      // Tutte le query a ogni giro solo sulle fonti veloci e generose. GDELT
+      // no, anche se regge una query unica per intero: risponde 429 a una
+      // raffica e ogni tentativo aspetta fino a 45 secondi — con otto query
+      // la raccolta di un solo progetto superava da sola il minuto e mezzo.
+      const queries = BATCH_FULLY.has(c.id) && c.id !== 'gdelt'
+        ? searchPlan
+        : await rotateQueries(searchPlan, `ingest_query_rotation_${project.id}_${c.id}`);
+      for (const cq of queries) {
+        const base: ListeningQuery = { ...q, anyTerms: cq.anchor, allTerms: [], excludeTerms: cq.exclude, groups: cq.groups };
+        if (BATCH_FULLY.has(c.id)) {
+          for (const batch of chunk(cq.anchor, CONNECTOR_TERM_CAP[c.id] ?? Infinity)) {
+            jobs.push({ connectorId: c.id, scope: 'query', label: cq.name, query: cq, fetch: () => c.fetchMentions({ ...base, anyTerms: batch }) });
+          }
+        } else {
+          const rotated = await rotateTerms(cq.anchor, `ingest_rotation_project_${project.id}_${c.id}_${cq.id}`);
+          jobs.push({ connectorId: c.id, scope: 'query', label: cq.name, query: cq, fetch: () => c.fetchMentions({ ...base, anyTerms: rotated }) });
+        }
+      }
+    }
+  }
+  for (const c of searchPlan ? [] : enabled) {
+    if (BATCH_FULLY.has(c.id)) {
+      // Copertura piena nello stesso ciclo: un blocco di termini per chiamata.
+      for (const batch of chunk(q.anyTerms, CONNECTOR_TERM_CAP[c.id] ?? Infinity)) {
+        jobs.push({ connectorId: c.id, scope: 'project', fetch: () => c.fetchMentions({ ...q, anyTerms: batch }) });
+      }
+    } else {
+      // Quota stretta o a pagamento: una chiamata sola, finestra ruotata ad ogni ciclo.
+      const rotated = await rotateTerms(q.anyTerms, `ingest_rotation_project_${project.id}_${c.id}`);
+      jobs.push({ connectorId: c.id, scope: 'project', fetch: () => c.fetchMentions({ ...q, anyTerms: rotated }) });
+    }
+  }
+  // Con un piano, i concorrenti sono query come le altre: nessuna ricerca doppia.
+  for (const entity of searchPlan ? [] : entities) {
+    if (entity.keywords.length === 0) continue;
+    for (const c of enabled) {
+      if (!ENTITY_SEARCH_CONNECTORS.has(c.id)) continue; // niente ricerca-concorrente su GDELT, quota stretta o a pagamento
+      for (const batch of chunk(entity.keywords, CONNECTOR_TERM_CAP[c.id] ?? Infinity)) {
+        const entityQuery: ListeningQuery = { ...q, anyTerms: batch, allTerms: [] };
+        jobs.push({ connectorId: c.id, scope: 'entity', label: entity.name, fetch: () => c.fetchMentions(entityQuery) });
+      }
+    }
+  }
+
+  const results = await runJobs(jobs);
+
+  // Più job possono condividere lo stesso connectorId (una volta per il
+  // progetto, una volta per ogni concorrente): si aggregano in un'unica riga
+  // di stato per fonte — "ok" se almeno un tentativo è andato a buon fine,
+  // il conteggio è la somma di tutti.
+  const agg = new Map<string, { ok: boolean; count: number; error?: string }>();
+  for (const r of results) {
+    const job = r.job;
+    const prevAgg = agg.get(job.connectorId) ?? { ok: false, count: 0 };
+    if (r.error !== undefined) {
+      const err = r.error as { message?: string } | undefined;
+      agg.set(job.connectorId, { ...prevAgg, error: String(err?.message ?? r.error) });
+      continue;
+    }
+    const now = Date.now();
+    const afterBoolean = r.mentions.filter((m) => matchesBoolean(m, job.scope, job.query));
+    const afterDate = afterBoolean
+      // Scarta date invalide o future (feed a volte sballati) e più vecchie di 90 giorni
+      .filter((m) => !Number.isNaN(m.publishedAt.getTime())
+        && m.publishedAt.getTime() < now + 3600_000
+        && m.publishedAt.getTime() > now - 90 * 86400_000);
+    // Conteggio per FASE: distingue "scartate dai termini da escludere" da
+    // "scartate perché troppo vecchie" da "già in archivio" — tre cause con
+    // tre rimedi diversi, che il solo totale finale confonde fra loro.
+    if (r.mentions.length !== afterDate.length) {
+      const lbl = `${job.connectorId}/${job.scope}${job.label ? ` "${job.label}"` : ''}`;
+      console.log(`[ingest] ${lbl}: ${r.mentions.length} grezze → ${afterBoolean.length} dopo NOT → ${afterDate.length} dopo data`);
+    }
+    const rows = afterDate
+      .map((m) => ({
+        projectId: project.id,
+        source: m.source,
+        kind: kindOf(m.source),
+        externalId: m.externalId.slice(0, 500),
+        url: m.url,
+        title: m.title,
+        content: m.content,
+        author: m.author,
+        authorHandle: m.authorHandle,
+        community: m.community,
+        publishedAt: m.publishedAt,
+        language: m.language,
+        // Il paese: quello dichiarato dalla fonte se c'è, altrimenti quello
+        // che dice il dominio nazionale dell'indirizzo. Se non lo dice
+        // nessuno resta vuoto: la lingua non è il paese.
+        country: toCountryCode(m.country) ?? countryFromUrl(m.url) ?? countryFromDomain(m.author),
+        engagement: m.engagement,
+        engagementScore: rawEngagementScore(m),
+        reach: m.reach,
+        // Tutte le query del piano che la menzione soddisfa, non solo quella
+        // che l'ha trovata: un articolo su "X e la protesta" è anche un
+        // articolo su X.
+        queryIds: compiled ? queriesMatching(compiled, `${m.title ?? ''} ${m.content}`) : [],
+      }));
+    let count = 0;
+    // Inserimento a blocchi con dedup sull'indice UNIQUE (project, source, external_id) —
+    // dedup naturale anche fra la ricerca del progetto e quella di un concorrente,
+    // se lo stesso articolo viene trovato da entrambe.
+    // La stessa fonte può restituire due volte lo stesso contenuto nella
+    // stessa risposta: in un blocco con ON CONFLICT DO UPDATE è un errore
+    // ("cannot affect row a second time"), verificato dal vivo. Si fondono
+    // prima, unendo le etichette.
+    const unique = new Map<string, (typeof rows)[number]>();
+    for (const r of rows) {
+      const key = `${r.source}|${r.externalId}`;
+      const prev = unique.get(key);
+      unique.set(key, prev ? { ...prev, queryIds: [...new Set([...prev.queryIds, ...r.queryIds])] } : r);
+    }
+    // Truncated text can end on half an emoji (a lone surrogate) or carry a NUL:
+    // Postgres rejects both and the whole refresh fails. Clean every text field.
+    const deduped = [...unique.values()].map((r) =>
+      Object.fromEntries(Object.entries(r).map(([k, v]) => [k, typeof v === 'string' ? cleanStoredText(v) : v])) as typeof r);
+    for (let j = 0; j < deduped.length; j += 100) {
+      const chunk = deduped.slice(j, j + 100);
+      if (chunk.length === 0) continue;
+      if (compiled) {
+        // Una menzione già in archivio può essere trovata da una query nuova:
+        // le sue etichette si uniscono invece di restare quelle di allora.
+        // xmax = 0 distingue le righe inserite da quelle aggiornate.
+        const res = await db.insert(mentions).values(chunk)
+          .onConflictDoUpdate({
+            target: [mentions.projectId, mentions.source, mentions.externalId],
+            set: {
+              queryIds: sql`(select coalesce(jsonb_agg(distinct x), '[]'::jsonb) from jsonb_array_elements(${mentions.queryIds} || excluded.query_ids) as x)`,
+            },
+          })
+          .returning({ inserted: sql<boolean>`(xmax = 0)` });
+        count += res.filter((x) => x.inserted).length;
+      } else {
+        const res = await db.insert(mentions).values(chunk).onConflictDoNothing().returning({ id: mentions.id });
+        count += res.length;
+      }
+    }
+    if (deduped.length > 0 && count !== deduped.length) {
+      const lbl = `${job.connectorId}/${job.scope}${job.label ? ` "${job.label}"` : ''}`;
+      console.log(`[ingest] ${lbl}: ${deduped.length} valide → ${count} inserite (${deduped.length - count} già in archivio)`);
+    }
+    inserted += count;
+    agg.set(job.connectorId, { ok: true, count: prevAgg.count + count });
+  }
+
+  // Costo stimato del giro Talkwalker: 10 credits a chiamata più 1 per
+  // risultato ricevuto (non per mention inserita: si paga anche il duplicato).
+  const talkwalkerJobs = results.filter((r) => r.job.connectorId === 'talkwalker');
+  if (talkwalkerJobs.length) {
+    const spent = talkwalkerJobs.reduce(
+      (tot, r) => tot + TALKWALKER_COST_PER_CALL + (r.error === undefined ? r.mentions.length : 0),
+      0,
+    );
+    await addTalkwalkerCredits(spent);
+    console.log(`[ingest] Talkwalker: ~${spent} credits spesi in questo giro (${await talkwalkerCreditsSpentToday()}/${talkwalkerDailyBudget()} oggi)`);
+  }
+
+  const nowIso = new Date().toISOString();
+  for (const [connectorId, a] of agg) {
+    const prev = status[connectorId];
+    status[connectorId] = {
+      ok: a.ok, count: a.count, error: a.ok ? undefined : a.error,
+      at: nowIso, lastOkAt: a.ok ? nowIso : prev?.lastOkAt,
+    };
+  }
+
+  await setMeta('source_status', status);
+  await setMeta('last_ingest_at', new Date().toISOString());
+  // Le mention raccolte prima che il paese esistesse hanno ancora il loro
+  // indirizzo: ogni giro ne recupera un blocco, finché non ne restano.
+  try {
+    const recuperate = await backfillCountries(project.id);
+    if (recuperate) console.log(`[ingest] paese dedotto dal dominio per ${recuperate} mention già in archivio`);
+  } catch (e) {
+    console.warn('[ingest] recupero dei paesi non riuscito:', (e as Error).message);
+  }
+
+  return { inserted, status };
+}
