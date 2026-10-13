@@ -37,6 +37,7 @@ export type NewsjackResult = {
   crisis?: {issuedAt:string;validUntil:string};
   reporterDiagnostics?: ReporterSelectionDiagnostic[];
   reporterParse?: ReporterParseDiagnostic;
+  reviewDiagnostics?: import('./newsjack-review-diagnostics').ReviewDiagnostics;
 };
 export type NewsjackSavedRun = {
   id: number; mode: NewsjackMode; status: string; input: string;

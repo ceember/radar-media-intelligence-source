@@ -11,7 +11,7 @@ const inputClass='w-full rounded-lg border border-[var(--border)] bg-black/10 p-
 const buttonClass='rounded-lg bg-sky-500 px-4 py-2 text-sm font-medium text-slate-950 hover:bg-sky-400 disabled:opacity-50';
 const lines=(s:string)=>s.split('\n').map(x=>x.trim()).filter(Boolean);
 
-export function SavedNewsjackResult({run,viewedAt}:{run:NewsjackSavedRun|PlanningRun;viewedAt:string}) {
+export function SavedNewsjackResult({run,viewedAt,canInspect=false}:{run:NewsjackSavedRun|PlanningRun;viewedAt:string;canInspect?:boolean}) {
   const result=run.result;
   return <article className="panel min-w-0 space-y-4 p-5">
     <h2 className="text-lg font-semibold">Saved {run.mode==='opportunities'?'Opportunities':run.mode==='angles'?'Angles And Headlines':run.mode==='review'?'Pitch Review':PLANNING_TITLES[run.mode]}</h2>
@@ -19,6 +19,13 @@ export function SavedNewsjackResult({run,viewedAt}:{run:NewsjackSavedRun|Plannin
     {result&&<p className="text-sm text-amber-300">A person must confirm before sending</p>}
     {result?.outcome==='insufficient-facts'&&<p role="status" className="text-sm text-amber-300">Not enough sourced facts to write angles</p>}
     {run.error&&<p role="alert" className="text-sm text-red-300">{run.error}</p>}
+    {canInspect&&run.mode==='review'&&<details className="text-xs text-slate-400"><summary>Admin Review Diagnostics</summary>
+      {result?.reviewDiagnostics?<>
+        <p>Editor: {result.reviewDiagnostics.editor.status} · Claims: {result.reviewDiagnostics.editor.claimCount??'Not Parsed'}</p>
+        <p>Stance: {result.reviewDiagnostics.stance.status} · Expected: {result.reviewDiagnostics.stance.expectedCount} · Parsed: {result.reviewDiagnostics.stance.parsedCount??'Not Parsed'} · Contexts: {result.reviewDiagnostics.stance.contextCount} · Eligible Contexts: {result.reviewDiagnostics.stance.eligibleCount}</p>
+        {result.reviewDiagnostics.stance.verdictCounts&&<p>Supports: {result.reviewDiagnostics.stance.verdictCounts.supports} · Contradicts: {result.reviewDiagnostics.stance.verdictCounts.contradicts} · Hypothetical Or Negated: {result.reviewDiagnostics.stance.verdictCounts.hypothetical_or_negated} · Unrelated: {result.reviewDiagnostics.stance.verdictCounts.unrelated}</p>}
+      </>:<p>Diagnostics Were Not Captured For This Saved Run. No Failure Cause Is Inferred.</p>}
+    </details>}
     {result?.opportunities.map(story=>{const expired=Boolean(story.firstLocatedAt&&Date.parse(viewedAt)-Date.parse(story.firstLocatedAt)>24*3_600_000);return <div key={story.id} className="space-y-2 rounded-lg border border-[var(--border)] p-4">
       <h3 className="break-words font-medium"><a href={story.url} target="_blank" rel="noopener noreferrer" className="text-sky-300 hover:underline">{story.title}</a></h3>
       <p className="text-xs text-slate-400">{story.source} · Published {formatArticleChecked(story.publishedAt)}</p>
@@ -51,9 +58,9 @@ export function SavedNewsjackResult({run,viewedAt}:{run:NewsjackSavedRun|Plannin
   </article>;
 }
 
-export function NewsjackPanel({projectId,mode,profile,canWrite,canRun,history:initialHistory,opportunities,selection,viewedAt:initialViewedAt}:{
+export function NewsjackPanel({projectId,mode,profile,canWrite,canRun,canInspect=false,history:initialHistory,opportunities,selection,viewedAt:initialViewedAt}:{
   projectId:number;mode:NewsjackMode|'setup';profile:NewsjackProfile;canWrite:boolean;canRun:boolean;
-  history:NewsjackSavedRun[];opportunities:NewsjackSavedRun[];selection:string;viewedAt:string;
+  history:NewsjackSavedRun[];opportunities:NewsjackSavedRun[];selection:string;viewedAt:string;canInspect?:boolean;
 }) {
   const [viewedAt,setViewedAt]=useState(initialViewedAt);
   const [history,setHistory]=useState(initialHistory),[selected,setSelected]=useState<NewsjackSavedRun|null>(initialHistory[0]??null);
@@ -101,7 +108,7 @@ export function NewsjackPanel({projectId,mode,profile,canWrite,canRun,history:in
         {!canRun&&canWrite&&mode!=='setup'&&<p className="text-sm text-amber-300">AI is not enabled for this account.</p>}
         {message&&<p role="status" className="text-sm text-sky-300">{message}</p>}{error&&<p role="alert" className="text-sm text-red-300">{error}</p>}
       </form>
-      {selected&&<SavedNewsjackResult run={selected} viewedAt={viewedAt}/>}
+      {selected&&<SavedNewsjackResult run={selected} viewedAt={viewedAt} canInspect={canInspect}/>}
     </div>
     {mode!=='setup'&&<aside className="panel min-w-0 space-y-3 p-4"><h2 className="font-medium">Project History</h2>
       {history.length?history.map(run=><button key={run.id} type="button" disabled={busy} onClick={()=>{setViewedAt(new Date().toISOString());setSelected(run)}} className="block w-full rounded-md p-2 text-left text-sm hover:bg-white/5">

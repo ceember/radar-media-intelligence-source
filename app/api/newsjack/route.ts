@@ -1,5 +1,5 @@
 import { and, eq } from 'drizzle-orm';
-import { getCurrentUser, userAiEnabled } from '@/lib/auth';
+import { getCurrentUser, isAdmin, userAiEnabled } from '@/lib/auth';
 import { getCurrentProject } from '@/lib/data';
 import { getDb } from '@/lib/db';
 import { newsjackRuns } from '@/lib/db/schema';
@@ -13,6 +13,9 @@ import { newsjackOriginSources, readNewsjackSource } from '@/lib/newsjack-source
 import { researchPublicUrl } from '@/lib/tavily-research';
 import type { NewsjackMode, NewsjackResult, NewsjackSource } from '@/lib/newsjack-types';
 import {claimSourceContext,factStancePrompt} from '@/lib/newsjack-facts';
+import {parseReviewSelection,reviewJsonSchema} from '@/lib/newsjack-review-contract';
+import {reviewStanceDiagnostic,type ReviewDiagnostics} from '@/lib/newsjack-review-diagnostics';
+import {projectReviewRun} from '@/lib/newsjack-review-projection';
 
 export const runtime='nodejs';
 export const dynamic='force-dynamic';
@@ -20,10 +23,12 @@ export const maxDuration=120;
 
 export async function POST(req:Request) {
   let runId:number|null=null, projectId:number|null=null;
+  let canInspect=false, reviewDiagnostics:ReviewDiagnostics|undefined;
   try {
     if(!researchSameOrigin(req.headers.get('origin'),req.url,req.headers.get('host'))) return Response.json({error:'Cross-site requests are not allowed.'},{status:403});
     if(!req.headers.get('content-type')?.startsWith('application/json')) return Response.json({error:'Send JSON.'},{status:415});
     const user=await getCurrentUser(); if(!user) return Response.json({error:'Sign in.'},{status:401});
+    canInspect=isAdmin(user);
     const project=await getCurrentProject(); if(!project) return Response.json({error:'No accessible project.'},{status:404});
     if(isDemoMode()||!researchCanWrite(user,project)) return Response.json({error:'Only the project owner or an admin can write or run Newsjack. Readers see saved results.'},{status:403});
     if(Number(req.headers.get('content-length'))>24_000) return Response.json({error:'Request too large.'},{status:400});
@@ -80,29 +85,43 @@ export async function POST(req:Request) {
     // Public-only policy applies to read evidence too, before sending it to AI or saving it.
     for(const source of sources) publicBrandGuard(project.name,source.text);
     const now=new Date().toISOString(), prompt=newsjackPrompt(mode,project.name,profile,input,stories,sources,now,searched);
-    const response=await callClaude(MODELS.haiku,`newsjack_${mode}`,prompt.system,prompt.user,5000,false,35_000);
+    if(mode==='review')reviewDiagnostics={editor:{status:'unavailable',claimCount:null},stance:reviewStanceDiagnostic([],sources,null,false)};
+    const response=await callClaude(MODELS.haiku,`newsjack_${mode}`,prompt.system,prompt.user,5000,false,35_000,mode==='review'?{name:'pitch_review_selection',schema:reviewJsonSchema(sources)}:undefined);
+    let guardedResponse=response;
+    if(mode==='review'){
+      const selection=parseReviewSelection(response,sources);
+      reviewDiagnostics!.editor=selection.diagnostic;
+      if(!selection.value)throw new Error('AI returned an incomplete draft. No result was published.');
+      guardedResponse=JSON.stringify(selection.value);
+    }
     if(!response) throw new Error('AI returned no usable text. Check the configured engine and spend cap.');
-    let result=guardNewsjackResult(response,mode,input,profile,stories,sources,now,searched);
+    let result=guardNewsjackResult(guardedResponse!,mode,input,profile,stories,sources,now,searched);
+    if(mode==='review')reviewDiagnostics!.stance=reviewStanceDiagnostic(result.claims,sources,null,false);
     if(mode==='review'&&result.claims.some(claim=>claimSourceContext(claim,sources))) {
       const stancePrompt=factStancePrompt(result.claims,sources);
       // Review reserved two daily slots up front. Failed/omitted second calls never refund capacity.
-      let stance:string|null=null;
+      let stance:string|null=null, unavailable=false;
       try {stance=await callClaude(MODELS.haiku,'newsjack_source_stance',stancePrompt.system,stancePrompt.user,500,false,20_000);}
-      catch {console.warn('[newsjack] source stance unavailable');}
-      result=guardNewsjackResult(response,mode,input,profile,stories,sources,now,searched,stance);
+      catch {unavailable=true;console.warn('[newsjack] source stance unavailable');}
+      reviewDiagnostics!.stance=reviewStanceDiagnostic(result.claims,sources,stance,true,unavailable);
+      result=guardNewsjackResult(guardedResponse!,mode,input,profile,stories,sources,now,searched,stance);
     }
+    if(reviewDiagnostics)result.reviewDiagnostics=reviewDiagnostics;
     publicBrandGuard(project.name,JSON.stringify(result));
     if(pool) result.warnings.push(`Checked ${pool.total} eligible stories; this bounded run assessed ${stories.length}. Filter counts: ${JSON.stringify(pool.counts)}.`);
     await db.update(newsjackRuns).set({result,status:result.outcome??(result.factCheck==='incomplete'?'incomplete':'complete')}).where(and(eq(newsjackRuns.id,runId),eq(newsjackRuns.projectId,project.id)));
-    return Response.json({run:await savedNewsjackRun(project.id,runId,db)});
+    const saved=await savedNewsjackRun(project.id,runId,db);
+    return Response.json({run:saved?projectReviewRun(saved,canInspect):null});
   } catch(error) {
     const message=error instanceof Error&&/^(AI |Use |Promotional |Primary|Tragedy|Incomplete:)/.test(error.message)?cleanStoredText(error.message,300):'Newsjack could not complete. No unchecked result was published.';
     let failedRun=null;
     if(runId!==null&&projectId!==null) {
       try{
         const db=await getDb();
-        await db.update(newsjackRuns).set({status:'failed',error:message}).where(and(eq(newsjackRuns.id,runId),eq(newsjackRuns.projectId,projectId)));
+        const result:NewsjackResult|undefined=reviewDiagnostics?{opportunities:[],blocks:[],claims:[],sources:[],warnings:[],reviewDiagnostics}:undefined;
+        await db.update(newsjackRuns).set({status:'failed',error:message,...(result?{result}:{})}).where(and(eq(newsjackRuns.id,runId),eq(newsjackRuns.projectId,projectId)));
         failedRun=await savedNewsjackRun(projectId,runId,db);
+        if(failedRun)failedRun=projectReviewRun(failedRun,canInspect);
       }catch{/* Reserved run and cap remain durable. */}
     }
     return Response.json({error:message,run:failedRun},{status:503});
