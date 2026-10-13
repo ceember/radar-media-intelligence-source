@@ -3,14 +3,16 @@ import {useState} from 'react';
 import Link from 'next/link';
 import {formatArticleChecked} from '@/lib/sidebar-date';
 import type {VisibilityRun} from '@/lib/newsjack-visibility-types';
+import {normalizeVisibilityFailureClass} from '@/lib/newsjack-visibility-diagnostics';
 
 const inputClass='w-full rounded-lg border border-[var(--border)] bg-black/10 p-3 text-sm outline-none focus:border-sky-500 disabled:opacity-60';
 const buttonClass='rounded-lg bg-sky-500 px-4 py-2 text-sm font-medium text-slate-950 hover:bg-sky-400 disabled:opacity-50';
 const lines=(value:string)=>value.split('\n').map(line=>line.trim()).filter(Boolean);
-export function SavedVisibility({run}:{run:VisibilityRun}){
+export function SavedVisibility({run,administrator=false}:{run:VisibilityRun;administrator?:boolean}){
  const result=run.result;
  return <article className="panel min-w-0 space-y-4 p-5"><h2 className="text-lg font-semibold">Saved Writing Audit</h2><p className="text-xs text-slate-400">{formatArticleChecked(run.createdAt)} · {run.status}</p>
   {run.error&&<p role="alert" className="text-sm text-red-300">{run.error}</p>}
+  {administrator&&normalizeVisibilityFailureClass(run.failureClass)&&<p className="text-xs text-slate-400">Admin Failure Class: {run.failureClass}</p>}
   {result&&<>
    <section className="space-y-2"><h3 className="font-medium">Verdict And Limits</h3><p className="text-sm text-slate-300">{result.verdict}</p><p className="text-xs text-slate-400">Audience: {result.context.audience} · Publisher: {result.context.publisher} · Purpose: {result.context.purpose}</p><p className="text-xs text-slate-400">Reader Questions: {result.context.queries.join(' · ')||'Not Supplied; No Queries Were Invented'}</p></section>
    <section className="space-y-3"><h3 className="font-medium">Highest-Leverage Changes</h3>{!result.changes.length&&<p className="text-sm text-amber-300">No Applicable Change Was Selected. This Is Not Proof Of Readiness Or Visibility.</p>}
@@ -24,7 +26,7 @@ export function SavedVisibility({run}:{run:VisibilityRun}){
   </>}
  </article>;
 }
-export function NewsjackVisibilityPanel({projectId,canWrite,canRun,history:initialHistory}:{projectId:number;canWrite:boolean;canRun:boolean;history:VisibilityRun[]}){
+export function NewsjackVisibilityPanel({projectId,canWrite,canRun,administrator=false,history:initialHistory}:{projectId:number;canWrite:boolean;canRun:boolean;administrator?:boolean;history:VisibilityRun[]}){
  const [fields,setFields]=useState<Record<string,string>>({documentType:'press-release'}),[publicOnly,setPublicOnly]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState(''),[message,setMessage]=useState('');
  const [history,setHistory]=useState(initialHistory),[selected,setSelected]=useState<VisibilityRun|null>(initialHistory[0]??null);
  function update(key:string,value:string){setFields(old=>({...old,[key]:value}));setPublicOnly(false);}
@@ -57,7 +59,7 @@ export function NewsjackVisibilityPanel({projectId,canWrite,canRun,history:initi
    {!canRun&&<p className="text-sm text-amber-300">AI is not enabled for this account. Saved audits remain available.</p>}
   </form>}
   {message&&<p role="status" className="text-sm text-sky-300">{message}</p>}{error&&<p role="alert" className="text-sm text-red-300">{error}</p>}
-  {selected&&<SavedVisibility run={selected}/>}
+  {selected&&<SavedVisibility run={selected} administrator={administrator}/>}
   <section className="panel space-y-2 p-4"><h2 className="font-medium">Measurement Panels — Subsequent Work</h2><p className="text-sm text-slate-400">This first slice audits supplied writing only. Evidence-bound prompt panels, baseline measurement, repeated platform runs and visibility tracking are not implemented. A writing audit is not a measurement result.</p></section>
  </div><aside className="panel min-w-0 space-y-3 p-4"><h2 className="font-medium">Project History</h2>{history.length?history.map(run=><button key={run.id} type="button" disabled={busy} className="block w-full rounded-md p-2 text-left text-sm hover:bg-white/5" onClick={()=>setSelected(run)}>{formatArticleChecked(run.createdAt)} · {run.status}</button>):<p className="text-sm text-slate-500">No saved audits yet.</p>}</aside></div>;
 }

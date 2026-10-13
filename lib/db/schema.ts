@@ -9,7 +9,7 @@ import type { TextSuggestions } from '../text-triage-types';
 import type { ResearchSource } from '../web-research-types';
 import type { NewsjackMode, NewsjackProfile, NewsjackResult } from '../newsjack-types';
 import type {PlanningMode,CoverageConfig} from '../newsjack-planning-types';
-import type { VisibilityResult } from '../newsjack-visibility-types';
+import type { VisibilityResult, VisibilityFailureClass } from '../newsjack-visibility-types';
 
 export const newsjackPlanningRuns=pgTable('newsjack_planning_runs',{
  id:serial('id').primaryKey(),projectId:integer('project_id').notNull(),userId:integer('user_id').notNull(),mode:text('mode').$type<PlanningMode>().notNull(),input:text('input').notNull().default(''),status:text('status').notNull().default('running'),result:jsonb('result').$type<NewsjackResult>(),error:text('error'),createdAt:timestamp('created_at',{withTimezone:true}).notNull().defaultNow(),
@@ -22,6 +22,7 @@ export const newsjackVisibilityRuns = pgTable('newsjack_visibility_runs', {
   id: serial('id').primaryKey(), projectId: integer('project_id').notNull(), userId: integer('user_id').notNull(),
   input: text('input').notNull().default(''), status: text('status').notNull().default('running'),
   result: jsonb('result').$type<VisibilityResult>(), error: text('error'),
+  failureClass: text('failure_class').$type<VisibilityFailureClass>(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 

@@ -1,5 +1,6 @@
 export type VisibilityLever='unique-evidence'|'scoped-answer'|'attribution'|'entities'|'headings'|'format'|'freshness'|'promotion'|'precision'|'padding';
 export type VisibilityQuestion='evidence'|'scope'|'query';
+export type VisibilityFailureClass='input_too_long'|'guard'|'quota'|'provider_error'|'schema'|'timeout';
 export type VisibilityInput={
  copy:string;documentType:'press-release'|'blog'|'contributed-article'|'expert-explainer';
  publisher:string;audience:string;purpose:string;queries:string[];
@@ -11,4 +12,4 @@ export type VisibilityResult={
  ledger:{originalCopy:string;sha256:string;evidence:VisibilityInput['evidence'];state:'supplied-not-verified'};
  changes:VisibilityChange[];questions:string[];claimsToCheck:string[];warnings:string[];
 };
-export type VisibilityRun={id:number;projectId:number;userId:number;input:string;status:string;result:VisibilityResult|null;error:string|null;createdAt:string};
+export type VisibilityRun={id:number;projectId:number;userId:number;input:string;status:string;result:VisibilityResult|null;error:string|null;createdAt:string;failureClass?:VisibilityFailureClass|null};

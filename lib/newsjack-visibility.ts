@@ -4,6 +4,7 @@ import {articleAnalysisPrompt} from './article-evidence';
 import {cleanStoredText} from './text-clean';
 import {researchPublicUrl} from './tavily-research';
 import type {VisibilityInput,VisibilityLever,VisibilityQuestion,VisibilityChange,VisibilityResult} from './newsjack-visibility-types';
+import {VisibilityAuditFailure} from './newsjack-visibility-diagnostics';
 
 const text=(max:number)=>z.string().trim().min(1).max(max).transform(value=>cleanStoredText(value)).refine(value=>value.trim().length>0);
 export const visibilityInputSchema=z.strictObject({
@@ -41,7 +42,7 @@ export function guardVisibility(raw:string,input:VisibilityInput,now:string):Vis
  if(raw.length>24000)throw Error('Invalid visibility selection');
  const parsed=selection.parse(JSON.parse(cleanStoredText(raw).replace(/^\s*```(?:json)?\s*|\s*```\s*$/g,'')));
  if(new Set(parsed.changes.map(change=>change.lever)).size!==parsed.changes.length||
-  [...parsed.changes.map(change=>change.passage),...parsed.claimsToCheck].some(passage=>!input.copy.includes(passage)))throw Error('Invalid visibility passage');
+  [...parsed.changes.map(change=>change.passage),...parsed.claimsToCheck].some(passage=>!input.copy.includes(passage)))throw new VisibilityAuditFailure('guard');
  const questions=new Set<VisibilityQuestion>(parsed.questions);
  if(!input.queries.length)questions.add('query');
  if(parsed.claimsToCheck.some(claim=>!input.evidence.some(source=>source.passage===claim)))questions.add('evidence');
