@@ -1,7 +1,10 @@
+import 'server-only';
 import { sql } from 'drizzle-orm';
 import type { PgliteDatabase } from 'drizzle-orm/pglite';
+import type { NeonQueryFunction } from '@neondatabase/serverless';
 import * as schema from './schema';
 import { requiredEmail } from '../runtime-contact';
+import { bootstrapSchema } from './bootstrap';
 
 // Un solo tipo per entrambi i driver: l'API di query drizzle è identica,
 // cambia solo il trasporto (Neon HTTP in produzione, PGlite in locale).
@@ -32,10 +35,12 @@ export function getInitializedDb(): DB {
 
 async function init(): Promise<DB> {
   let db: DB;
+  let neonClient: NeonQueryFunction<false, false> | undefined;
   if (process.env.DATABASE_URL) {
     const { neon } = await import('@neondatabase/serverless');
     const { drizzle } = await import('drizzle-orm/neon-http');
-    db = drizzle(neon(process.env.DATABASE_URL), { schema }) as unknown as DB;
+    neonClient = neon(process.env.DATABASE_URL);
+    db = drizzle(neonClient, { schema }) as unknown as DB;
   } else {
     const { PGlite } = await import('@electric-sql/pglite');
     const { drizzle } = await import('drizzle-orm/pglite');
@@ -45,7 +50,7 @@ async function init(): Promise<DB> {
     const client = new PGlite(dir);
     db = drizzle(client, { schema }) as unknown as DB;
   }
-  await ensureSchema(db);
+  await ensureSchema(db, neonClient);
   if (process.env.DEMO_MODE === '1') {
     const { seedDemo } = await import('./demo-seed');
     await seedDemo(db);
@@ -513,10 +518,8 @@ const DDL = [
   ...REFRESH_RUN_DDL,
 ];
 
-async function ensureSchema(db: DB) {
-  for (const stmt of DDL) {
-    await db.execute(sql.raw(stmt));
-  }
+async function ensureSchema(db: DB, neonClient?: NeonQueryFunction<false, false>) {
+  await bootstrapSchema(db, DDL, neonClient);
 }
 
 // Demo project on first run: the user edits it from Settings.

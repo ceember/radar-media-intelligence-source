@@ -1,7 +1,8 @@
 import { sourceAllowed } from '@/lib/connector-config';
 import { eq, sql } from 'drizzle-orm';
 import { getDb, setMeta, getMeta } from '@/lib/db';
-import { backfillCountries, countryFromDomain, countryFromUrl, toCountryCode } from '@/lib/country-codes';
+import { countryFromDomain, countryFromUrl, toCountryCode } from '@/lib/country-codes';
+import { backfillCountries } from '@/lib/country-backfill';
 import { mentions, projects, benchmarkEntities } from '@/lib/db/schema';
 import { CONNECTORS, kindOf } from '@/lib/connectors';
 import { hydrateConnectorCredentials } from '@/lib/connector-credentials';

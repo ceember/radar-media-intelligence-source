@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getCurrentProject } from '@/lib/data';
 import { getCurrentUser, isAdmin } from '@/lib/auth';
-import { backfillCountries } from '@/lib/country-codes';
+import { backfillCountries } from '@/lib/country-backfill';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
