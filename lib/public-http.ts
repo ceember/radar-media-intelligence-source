@@ -94,11 +94,14 @@ export function fetchPublicArchiveIndex(input: string, options: PublicTextOption
 export function fetchPublicAuditGateway(input: string, options: PublicTextOptions & { allowedHostname: string; body: string }) {
   return fetchFixedGateway(input, options, '/audit-page', 100_000);
 }
+export function fetchPublicRenderGateway(input: string, options: PublicTextOptions & { allowedHostname: string; body: string }) {
+  return fetchFixedGateway(input, options, '/render-page', 40_000);
+}
 /** Search has its own 30-second ceiling; ordinary article/provider fetches remain at 20 seconds. */
 export function fetchPublicSearchGateway(input: string, options: PublicTextOptions & { allowedHostname: string; body: string }) {
   return fetchFixedGateway(input, options, '/search', 30_000);
 }
-function fetchFixedGateway(input: string, options: PublicTextOptions & { allowedHostname: string; body: string }, path: '/search' | '/audit-page', ceiling: number) {
+function fetchFixedGateway(input: string, options: PublicTextOptions & { allowedHostname: string; body: string }, path: '/search' | '/audit-page' | '/render-page', ceiling: number) {
   const url = validateStrictTarget(input, options.allowedHostname, new Set());
   if (url.pathname !== path || url.search || Buffer.byteLength(options.body) > 4000) throw Error('Public gateway target invalid');
   return fetchPublicTextBounded(input, { ...options, headers: { ...options.headers, 'Content-Length': String(Buffer.byteLength(options.body)) }, method: 'POST', maxRedirects: 0 }, ceiling);

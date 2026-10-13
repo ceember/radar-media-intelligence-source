@@ -6,7 +6,7 @@ import type { PageSpeedStrategy, PageSpeedProvider } from '@/lib/competitor-page
 export function PageSpeedControls({ projectId, pageId, ownServer = false }: { projectId: number; pageId: number; ownServer?: boolean }) {
   const router = useRouter();
   const [strategy, setStrategy] = useState<PageSpeedStrategy>('mobile'), [busy, setBusy] = useState(false), [message, setMessage] = useState('');
-  const [provider, setProvider] = useState<PageSpeedProvider>('google');
+  const [provider, setProvider] = useState<PageSpeedProvider>(ownServer ? 'f9' : 'google');
   async function audit() {
     if (busy) return;
     setBusy(true); setMessage(provider === 'f9' ? 'Requesting one own-server lab audit (up to 100 seconds)…' : 'Requesting one hosted lab audit…');

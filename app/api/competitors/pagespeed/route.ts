@@ -13,6 +13,7 @@ export async function POST(req: Request) {
       return Response.json({ error: 'Choose a selected page and mobile or desktop strategy.' }, { status: 400 });
     const provider = context.body.provider ?? 'google';
     if (!['google','f9'].includes(provider)) return Response.json({ error: 'Choose an available lab provider.' }, { status: 400 });
+    if(provider==='f9'&&process.env.MI_TOOLS_AUDIT_ENABLED!=='1')return Response.json({error:'Own-server lab audit is disabled.'},{status:503});
     const deadline = started + (provider === 'f9' ? 110_000 : 20_000);
     const result = await withinResearchDeadline(auditCompetitorPage(context.project.id, context.body.pageId, context.body.strategy, deadline, provider), deadline);
     return Response.json(result, { status: result.status });

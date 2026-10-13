@@ -59,7 +59,7 @@ export default async function CompetitorPage() {
         <h3 className="break-words text-lg font-semibold text-slate-100">{page.entity} · {page.label}</h3>
         <a href={page.url} target="_blank" rel="noopener noreferrer" className="block break-all text-sm text-sky-300 underline">{page.url}</a>
         {enabled && <CompetitorControls projectId={project.id} pageId={page.id} />}
-        {current ? <><p className="text-sm text-slate-300">{stamp(current.capturedAt)} · {difference?.status === 'baseline' ? 'First Successful Baseline' : difference?.status === 'unchanged' ? 'Unchanged Captured Text' : difference?.status === 'changed' ? 'Captured Text Changed' : difference?.status === 'partial' ? 'Partial Capture — Comparison Unknown' : difference?.status === 'limited' ? 'Comparison Limit Reached — Unknown' : 'Capture Unknown'}</p>
+        {current ? <><p className="text-sm text-slate-300">{stamp(current.capturedAt)} · {difference?.status === 'baseline' ? 'First Successful Baseline' : difference?.status === 'unchanged' ? 'Unchanged Captured Text' : difference?.status === 'changed' ? 'Captured Text Changed' : difference?.status === 'partial' ? 'Partial Capture — Comparison Unknown' : difference?.status === 'limited' ? 'Comparison Limit Reached — Unknown' : current.status==='ok'?'Comparison Unknown':'Capture Unknown'}</p>
           {current.error && <p className="break-words text-sm text-amber-300">{current.error}</p>}
           {current.evidence && <div className="space-y-1 text-xs text-slate-400">
             <p>Robots: {current.evidence.robots.status} · {current.evidence.robots.userAgent} · checked {stamp(current.evidence.robots.checkedAt)} · crawl delay {current.evidence.robots.delay}s</p>

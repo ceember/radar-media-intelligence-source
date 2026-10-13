@@ -58,7 +58,7 @@ export function pageSpeedEndpoint(url: string, strategy: PageSpeedStrategy, key 
   return endpoint.href;
 }
 export function pageSpeedGateway() {
-  return toolsGateway('audit-page');
+  return process.env.MI_TOOLS_AUDIT_ENABLED === '1' ? toolsGateway('audit-page') : null;
 }
 /** Gateway contract: scores are already 0–100, metrics use milliseconds and unitless CLS. */
 export function parseGatewayAudit(value: unknown, requestedUrl: string, recordedAt = new Date().toISOString()): PageSpeedResult {

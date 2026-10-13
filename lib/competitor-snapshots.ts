@@ -5,7 +5,9 @@ import { fetchPublicText } from '@/lib/public-http';
 import { withinResearchDeadline } from '@/lib/web-research';
 import { competitorCrawlPolicy, COMPETITOR_USER_AGENT } from './competitor-crawl-policy';
 import { readStructuredOffers } from './competitor-offers';
-import { CAPTURE_DAILY_CAP, CAPTURE_INPUT_BYTES, competitorTextLimit, normalizeCompetitorHtml, selectedPublicUrl, utf8Bound, type CaptureEvidence, type CompetitorPage, type CompetitorSnapshot } from './competitor-page';
+import { CAPTURE_DAILY_CAP, CAPTURE_INPUT_BYTES, competitorTextLimit, normalizeCompetitorHtml, normalizeCompetitorRenderedText, selectedPublicUrl, utf8Bound, type CaptureEvidence, type CompetitorPage, type CompetitorSnapshot } from './competitor-page';
+import {competitorRenderGateway,renderCompetitorBody,RENDER_UNAVAILABLE_MESSAGE,RENDER_ACCESS_REFUSED_MESSAGE} from './competitor-render';
+import {publisherHasAccessBarrier} from './public-access-barrier';
 
 export async function selectedCompetitorPages(projectId: number, db?: DB): Promise<CompetitorPage[]> {
   return (await (db ?? await getDb()).execute(sql`SELECT id, project_id AS "projectId", entity_id AS "entityId", entity, label, url FROM competitor_pages WHERE project_id=${projectId} ORDER BY slot`)).rows as CompetitorPage[];
@@ -43,7 +45,7 @@ export async function competitorCaptureHistory(projectId: number, pageId: number
     ) ORDER BY captured_at DESC,id DESC`)).rows;
   return rows.map((r) => ({ ...r, capturedAt: new Date(r.capturedAt as string).toISOString() })) as CompetitorSnapshot[];
 }
-export async function captureCompetitorPage(projectId: number, pageId: number, deadline = Date.now() + 45_000) {
+export async function captureCompetitorPage(projectId: number, pageId: number, deadline = Date.now() + (competitorRenderGateway()?100_000:45_000)) {
   const wait = <T>(p: PromiseLike<T>) => withinResearchDeadline(p, deadline);
   const db = await wait(getDb());
   const page = (await wait(selectedCompetitorPages(projectId, db))).find((p) => p.id === pageId);
@@ -92,18 +94,31 @@ export async function captureCompetitorPage(projectId: number, pageId: number, d
       maxBytes: CAPTURE_INPUT_BYTES, maxRedirects: 0, headers: { 'User-Agent': COMPETITOR_USER_AGENT, Accept: 'text/html' } }));
     if (!/^(text\/html|application\/xhtml\+xml)\b/i.test(response.contentType)) throw new Error('The selected URL did not return HTML; result unknown.');
     if (Buffer.byteLength(response.text) > CAPTURE_INPUT_BYTES) throw new Error('The selected HTML exceeds the decoded input limit; result unknown.');
-    const normalized = normalizeCompetitorHtml(response.text, competitorTextLimit(page));
-    evidence = { robots: policy, inputBytes: response.bytes, finalUrl: response.finalUrl,
+    let normalized = normalizeCompetitorHtml(response.text, competitorTextLimit(page));
+    let rendered=false;
+    let inputBytes=response.bytes;
+    if(normalized.text.length<80){
+      if(publisherHasAccessBarrier(response.text))throw Error('The selected page has an access barrier; result unknown.');
+      if(!competitorRenderGateway())throw Error('Too little static page text; the page may require JavaScript. Result unknown.');
+      const body=await wait(renderCompetitorBody(url,deadline));
+      normalized=normalizeCompetitorRenderedText(body,competitorTextLimit(page));
+      inputBytes=Buffer.byteLength(body);
+      rendered=true;
+    }
+    evidence = { robots: policy, inputBytes, ...(rendered?{}:{finalUrl:response.finalUrl}),
       textBytes: normalized.textBytes, textLimitBytes: normalized.textLimitBytes, truncated: normalized.truncated, method: normalized.method };
-    if (normalized.text.length < 80) throw new Error('Too little static page text; the page may require JavaScript. Result unknown.');
-    const offers = readStructuredOffers(response.text, url, Math.min(deadline, Date.now() + 2000));
+    if (normalized.text.length < 80) throw new Error('Too little captured page text; result unknown.');
+    const offers = rendered?{status:'unknown',offers:[],warnings:['Rendered BODY text has no HTML; structured offers are unobserved.'],method:'Rendered BODY only; no structured HTML'}:
+      readStructuredOffers(response.text, url, Math.min(deadline, Date.now() + 2000));
     const saved = await wait(db.execute(sql`UPDATE competitor_snapshots SET status='ok',normalized_text=${normalized.text},text_hash=${normalized.hash},
-      raw_html=${cleanStoredText(response.text)},evidence=${JSON.stringify(evidence)}::jsonb,offers=${JSON.stringify(offers)}::jsonb,error=NULL
-      WHERE id=${id} AND project_id=${projectId} AND page_id=${pageId} AND clock_timestamp()<${new Date(deadline).toISOString()}::timestamptz RETURNING id`));
+      raw_html=${rendered?null:cleanStoredText(response.text)},evidence=${JSON.stringify(evidence)}::jsonb,offers=${JSON.stringify(offers)}::jsonb,error=NULL
+      WHERE id=${id} AND project_id=${projectId} AND page_id=${pageId} AND source_url=${url}
+      AND EXISTS(SELECT 1 FROM competitor_pages WHERE id=${pageId} AND project_id=${projectId} AND url=${url})
+      AND clock_timestamp()<${new Date(deadline).toISOString()}::timestamptz RETURNING id`));
     if (!saved.rows.length) throw Error('Capture deadline reached before saving.');
     return { status: 200, id, captureStatus: 'ok', message: normalized.truncated ? `Partial capture saved (${normalized.textLimitBytes / 1000} KB text limit).` : 'Capture saved.' };
   } catch (error) {
-    const message = error instanceof Error && /^(Robots|Disallowed|Crawl|Another|Too little|The selected)/.test(error.message)
+    const message = error instanceof Error && (/^(Robots|Disallowed|Crawl|Another|Too little|The selected)/.test(error.message)||[RENDER_UNAVAILABLE_MESSAGE,RENDER_ACCESS_REFUSED_MESSAGE].includes(error.message))
       ? error.message : 'Page fetch failed, was rate limited or exceeded its limit. Result unknown; retry on a later refresh.';
     // Final saving has a small independent budget; the initial unknown row survives any DB outage.
     try { await withinResearchDeadline(db.execute(sql`UPDATE competitor_snapshots SET status='unknown',error=${message},evidence=${JSON.stringify(evidence)}::jsonb

@@ -1,11 +1,12 @@
 import { competitorWriteRequest } from '@/lib/competitor-api';
 import { captureCompetitorPage } from '@/lib/competitor-snapshots';
 import { withinResearchDeadline } from '@/lib/web-research';
+import {competitorRenderGateway} from '@/lib/competitor-render';
 
-export const maxDuration = 60;
+export const maxDuration = 120;
 export const runtime = 'nodejs';
 export async function POST(req: Request) {
-  const deadline = Date.now() + 50_000;
+  const deadline = Date.now() + (competitorRenderGateway()?105_000:50_000);
   try {
     const context = await withinResearchDeadline(competitorWriteRequest(req), deadline);
     if (context.response) return context.response;

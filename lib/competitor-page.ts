@@ -54,10 +54,19 @@ export function normalizeCompetitorHtml(html: string, textLimitBytes = 20_000) {
   return { text, hash: createHash('sha256').update(text).digest('hex'), textBytes: Buffer.byteLength(text),
     textLimitBytes, truncated: Buffer.byteLength(decoded) > textLimitBytes, method: 'Cheerio static HTML block text v1 (navigation and scripts removed)' };
 }
+export function normalizeCompetitorRenderedText(body:string,textLimitBytes=20_000){
+  if(![20_000,60_000].includes(textLimitBytes))throw Error('Unsupported competitor text limit.');
+  const decoded=cleanStoredText(body).split(/\r?\n/).map(line=>line.replace(/\s+/g,' ').trim()).filter(Boolean).join('\n');
+  const text=utf8Bound(decoded,textLimitBytes);
+  return {text,hash:createHash('sha256').update(text).digest('hex'),textBytes:Buffer.byteLength(text),textLimitBytes,
+    truncated:Buffer.byteLength(decoded)>textLimitBytes||body.length===100_000,method:'Own server rendered BODY text (not HTML; DOM, technology, SEO and structured offers unobserved)'};
+}
 export function competitorDiff(previous: CompetitorSnapshot | undefined, current: CompetitorSnapshot) {
   if (current.status !== 'ok' || current.text === null) return { status: 'unknown' as const, changes: [] };
   if (!previous || previous.status !== 'ok' || previous.text === null || previous.sourceUrl !== current.sourceUrl)
     return { status: 'baseline' as const, changes: [] };
+  if((current.evidence?.method?.startsWith('Own server rendered')||previous.evidence?.method?.startsWith('Own server rendered'))&&current.evidence?.method!==previous.evidence?.method)
+    return {status:'unknown' as const,changes:[]};
   if (previous.evidence?.truncated || current.evidence?.truncated) return { status: 'partial' as const, changes: [] };
   const changes = diffLines(previous.text, current.text, { timeout: 1000, maxEditLength: 500 });
   if (!changes) return { status: 'limited' as const, changes: [] };
