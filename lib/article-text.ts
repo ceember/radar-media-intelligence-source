@@ -71,6 +71,7 @@ export async function fetchArticleText(url: string, fetchPage = fetchPublicText)
 export async function fetchArticles(
   items: { id: number; url: string }[], concurrency = 4,
   fetchArticle = fetchArticleText,
+  onResult?: (id: number, result: ArticleFetch) => void,
 ): Promise<Map<number, ExtractedArticle>> {
   const out = new Map<number, ExtractedArticle>();
   const hostBusy = new Set<string>();
@@ -90,6 +91,7 @@ export async function fetchArticles(
       hostBusy.add(host);
       try {
         const r = await fetchArticle(job.url);
+        onResult?.(job.id, r);
         if (r.ok) out.set(job.id, { text: r.text, metadata: r.metadata });
       } finally {
         hostBusy.delete(host);

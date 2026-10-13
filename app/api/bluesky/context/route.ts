@@ -4,7 +4,7 @@ import { getCurrentProject } from '@/lib/data';
 import { isDemoMode } from '@/lib/session';
 import { researchCanWrite, researchSameOrigin, withinResearchDeadline } from '@/lib/web-research';
 import { blueskyMentionIds } from '@/lib/bluesky-context';
-import { refreshBlueskyContexts, savedBlueskyContext } from '@/lib/bluesky-context-store';
+import { refreshBlueskyContexts, savedBlueskyContext, selectBlueskyMentions } from '@/lib/bluesky-context-store';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -43,7 +43,10 @@ export async function GET(request: Request) {
     const mentionId = Number(query.get('mentionId'));
     if (!Number.isSafeInteger(mentionId) || mentionId<1) return response({ error:'Choose a stored Bluesky mention.' },400);
     const context = await wait(savedBlueskyContext(project.id,mentionId));
-    return context ? response({ context }) : response({ error:'No saved public context for this post in the current project.' },404);
+    if (context) return response({ context });
+    const selections = await wait(selectBlueskyMentions(project.id,[mentionId]));
+    return selections.length===1 ? response({ context:null })
+      : response({ error:'No public Bluesky post in the current project.' },404);
   } catch { return response({ error:'Saved context could not be read or timed out.' },503); }
 }
 

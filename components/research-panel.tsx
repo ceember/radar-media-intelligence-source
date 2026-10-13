@@ -2,10 +2,17 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { ExternalLink, Loader2, Search } from 'lucide-react';
-import type { ResearchEvent, ResearchRun } from '@/lib/web-research-types';
+import type { ResearchEvent, ResearchRun, ResearchSource, ResearchFailureCategory } from '@/lib/web-research-types';
 import { checkResearchCitations } from '@/lib/web-research';
 
 type HistoryItem = Pick<ResearchRun, 'id' | 'question' | 'status' | 'createdAt'>;
+
+const failureLabels: Record<ResearchFailureCategory, string> = { robots: 'Robots', http_status: 'HTTP Status', timeout: 'Timeout', barrier: 'Access Barrier', non_html: 'Non-HTML', guard: 'Public Reader Guard', network: 'Network' };
+export function ResearchReadStatus({ source }: { source: ResearchSource }) {
+  return <>{source.status === 'read' ? 'Read · Source Snapshot Saved' : source.error || 'Not Yet Read'}
+    {source.failureCategory ? ` · ${failureLabels[source.failureCategory]}${source.httpStatus ? ` ${source.httpStatus}` : ''}` : source.status === 'failed' ? ' · Failure Category Not Recorded' : ''}
+    {source.elapsedMs !== undefined && ` · ${source.elapsedMs} ms`}</>;
+}
 
 /** React text nodes escape all fetched/model HTML. Only validated source URLs become links. */
 function CitedAnswer({ run }: { run: ResearchRun }) {
@@ -117,7 +124,7 @@ export function ResearchPanel({ projectId, history: initialHistory, enabled, dis
           <p className="mt-1 text-xs text-slate-400">Search Provider: {(source.providers ?? ['tavily']).map(p => p === 'f9' ? 'Own Server (f9)' : 'Tavily').join(' · ')}
             {source.reader && ` · Page Reader: ${source.reader === 'native' ? 'Native Extractor' : 'Tavily Extract'}`}</p>
           <p className={`mt-1 text-xs ${source.status === 'failed' ? 'text-amber-300' : 'text-slate-400'}`}>
-            {source.status === 'read' ? 'Read · Source Snapshot Saved' : source.error || 'Not Yet Read'}</p>
+            <ResearchReadStatus source={source} /></p>
           {source.text && <details className="mt-2 text-xs text-slate-400"><summary className="cursor-pointer">Read Saved Snapshot</summary><p className="mt-2 whitespace-pre-wrap break-words">{source.text}</p></details>}
         </li>)}</ol>
       </section>}

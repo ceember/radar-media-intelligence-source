@@ -1,7 +1,9 @@
+export type ResearchFailureCategory = 'robots' | 'http_status' | 'timeout' | 'barrier' | 'non_html' | 'guard' | 'network';
 export type ResearchSource = {
   id: number; title: string; url: string; snippet: string; text: string;
   status: 'pending' | 'read' | 'failed'; error?: string;
   providers?: ('tavily' | 'f9')[]; reader?: 'tavily-extract' | 'native';
+  failureCategory?: ResearchFailureCategory; httpStatus?: number; elapsedMs?: number;
 };
 
 export type ResearchRun = {

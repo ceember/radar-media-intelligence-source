@@ -66,6 +66,12 @@ export type ResearchDependencies = {
   snapshot: (value: ResearchSnapshot) => Promise<void>;
 };
 
+export function researchReadingBudget(remainingMs: number): number {
+  const writingReserve = Math.min(25_000, Math.ceil(remainingMs * 0.3));
+  const snapshotReserve = Math.min(1_000, Math.ceil(remainingMs * 0.05));
+  return Math.max(0, Math.min(54_000, Math.floor(remainingMs - writingReserve - snapshotReserve)));
+}
+
 export async function researchQuestion(question: string, deps: ResearchDependencies,
   emit: (event: ResearchEvent) => void, deadline: number, signal: AbortSignal) {
   const snapshot: ResearchSnapshot = { queries: [], sources: [], warnings: [] };
@@ -95,7 +101,9 @@ export async function researchQuestion(question: string, deps: ResearchDependenc
   await wait(deps.snapshot(snapshot));
   if (!snapshot.sources.length) throw new Error('No public sources were found. Try a different question.');
   emit({ type: 'step', step: 'reading', message: `Reading ${snapshot.sources.length} sources…` });
-  snapshot.sources = await wait(deps.extract(snapshot.sources, remaining(20_000)));
+  const readBudget = researchReadingBudget(remaining(105_000));
+  if (readBudget < 100) throw new Error('Research reached its time limit. Try a narrower question.');
+  snapshot.sources = await wait(deps.extract(snapshot.sources, readBudget));
   for (const source of snapshot.sources) {
     if (source.status === 'failed') snapshot.warnings.push(`Source [${source.id}] could not be read and was excluded from the answer.`);
   }

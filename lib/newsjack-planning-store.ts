@@ -1,9 +1,10 @@
 import {createHash} from 'node:crypto';
-import {and,desc,eq,gte,inArray,sql} from 'drizzle-orm';
+import {and,desc,eq,gte,inArray,isNull,sql} from 'drizzle-orm';
 import {getDb,type DB} from './db';
 import {mentions,newsjackCoverageConfig,newsjackPlanningRuns} from './db/schema';
 import {researchPublicUrl} from './tavily-research';
 import {cleanStoredText} from './text-clean';
+import {isOpaqueRedirect} from './article-text';
 import type {CoverageConfig,CoverageDecision,PlanningMode,PlanningRun} from './newsjack-planning-types';
 import type {NewsjackResult,NewsjackStory} from './newsjack-types';
 const hash=(value:string)=>createHash('sha256').update(value).digest('hex');
@@ -16,10 +17,10 @@ export async function savePlanningResult(projectId:number,userId:number,mode:Pla
 export async function coverageConfig(projectId:number,db?:DB):Promise<CoverageConfig|null>{const [row]=await (db??await getDb()).select().from(newsjackCoverageConfig).where(eq(newsjackCoverageConfig.projectId,projectId)).limit(1);return row?.config??null;}
 export async function saveCoverageConfig(projectId:number,config:CoverageConfig,db?:DB){await (db??await getDb()).insert(newsjackCoverageConfig).values({projectId,config}).onConflictDoUpdate({target:newsjackCoverageConfig.projectId,set:{config,updatedAt:new Date()}});}
 export async function coverageCandidates(projectId:number,config:CoverageConfig,db?:DB):Promise<{stories:NewsjackStory[];known:number;total:number}>{
- const database=db??await getDb(),rows=await database.select().from(mentions).where(and(eq(mentions.projectId,projectId),eq(mentions.kind,'article'),inArray(mentions.source,['rss','googlenews','gdelt','newsapi']),gte(mentions.publishedAt,new Date(Date.now()-14*86_400_000)))).orderBy(desc(mentions.publishedAt)).limit(120);
+ const database=db??await getDb(),rows=await database.select().from(mentions).where(and(eq(mentions.projectId,projectId),eq(mentions.kind,'article'),isNull(mentions.importFileId),inArray(mentions.source,['rss','googlenews','gdelt','newsapi','newsdata']),gte(mentions.publishedAt,new Date(Date.now()-14*86_400_000)))).orderBy(desc(mentions.publishedAt)).limit(120);
  const seen=await database.execute(sql`SELECT url_hash FROM newsjack_coverage_decisions WHERE project_id=${projectId} AND config_hash=${coverageConfigHash(config)}`),knownHashes=new Set(seen.rows.map(row=>String((row as {url_hash:string}).url_hash))),unique=new Set<string>();
  const stories:NewsjackStory[]= [];let known=0,total=0;
- for(const row of rows){const url=researchPublicUrl(row.url),title=cleanStoredText(row.title??'Untitled Story',300),text=cleanStoredText(row.articleText??row.content,5000);if(!url||!(title+' '+text).toLowerCase().includes(config.keyword.toLowerCase()))continue;const key=coverageUrlHash(url);if(unique.has(key))continue;unique.add(key);total++;if(knownHashes.has(key)){known++;continue;}if(stories.length<4)stories.push({id:row.id,url,title,text,publishedAt:row.publishedAt.toISOString(),source:row.source});}
+ for(const row of rows){const url=researchPublicUrl(row.url),title=cleanStoredText(row.title??'Untitled Story',300),text=cleanStoredText(row.articleText??row.content,5000);if(!url||isOpaqueRedirect(url)||!(title+' '+text).toLowerCase().includes(config.keyword.toLowerCase()))continue;const key=coverageUrlHash(url);if(unique.has(key))continue;unique.add(key);total++;if(knownHashes.has(key)){known++;continue;}if(stories.length<4)stories.push({id:row.id,url,title,text,publishedAt:row.publishedAt.toISOString(),source:row.source});}
  return {stories,known,total};
 }
 /** Dedupe and alert insertion are one statement; concurrent runs/config edits cannot duplicate an alert. */
