@@ -50,7 +50,7 @@ export async function POST(req:Request){
    publicBrandGuard(project.name,JSON.stringify(result));
    return Response.json({run:await savePlanningResult(project.id,user.id,mode,input,result)});
   }
-  if(mode==='calendar')try{validateCalendar(calendarSchema.parse(parsed.data),now)}catch{return Response.json({error:'Range or unclear date, not checked. Use a real single-day date inside the next six months and an exact allowlisted source quote.'},{status:400})}
+  if(mode==='calendar')try{validateCalendar(calendarSchema.parse(parsed.data),now)}catch{return Response.json({error:'Range or unclear date, not checked. Use real dates inside the next six months and an exact allowlisted source quote naming both bounds for a range.'},{status:400})}
   if(mode==='journalists'&&PITCH_SLOP.test(journalistSchema.parse(parsed.data).pitch)){
    const result=planningResult();result.blocks.push({title:'No Pick — Pitch Not Ready',text:'Remove template placeholders, generic flattery and promotional language. Review the pitch before checking named reporters. No AI call or daily slot was used.',sourceIds:[]});
    return Response.json({run:await savePlanningResult(project.id,user.id,mode,input,result)});

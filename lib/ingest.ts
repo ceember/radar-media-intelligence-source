@@ -8,6 +8,7 @@ import { hydrateConnectorCredentials } from '@/lib/connector-credentials';
 import type { RawMention, ListeningQuery } from '@/lib/connectors/types';
 import { compilePlan, matchesQuery, queriesMatching, validatePlan, type CompiledQuery } from '@/lib/query-plan';
 import { cleanStoredText } from '@/lib/text-clean';
+import {refreshCounter,type RefreshCounters} from '@/lib/refresh-run-counters';
 
 export type SourceStatus = Record<string, {
   ok: boolean; count: number; error?: string; at: string;
@@ -171,7 +172,7 @@ const CONCURRENCY_PER_CONNECTOR = 2;
 const ROUND_DELAY_MS = 400;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function runJobs(jobs: Job[]): Promise<{ job: Job; mentions: RawMention[]; error?: unknown }[]> {
+async function runJobs(jobs: Job[],counters:RefreshCounters): Promise<{ job: Job; mentions: RawMention[]; error?: unknown; failed?:boolean }[]> {
   const byConnector = new Map<string, Job[]>();
   for (const j of jobs) {
     if (!byConnector.has(j.connectorId)) byConnector.set(j.connectorId, []);
@@ -179,7 +180,8 @@ async function runJobs(jobs: Job[]): Promise<{ job: Job; mentions: RawMention[];
   }
   const perConnector = await Promise.all(
     [...byConnector.values()].map(async (group) => {
-      const out: { job: Job; mentions: RawMention[]; error?: unknown }[] = [];
+      const started=Date.now(),counter=refreshCounter(counters,group[0].connectorId);
+      const out: { job: Job; mentions: RawMention[]; error?: unknown; failed?:boolean }[] = [];
       for (let i = 0; i < group.length; i += CONCURRENCY_PER_CONNECTOR) {
         if (i > 0) await sleep(ROUND_DELAY_MS);
         const batch = group.slice(i, i + CONCURRENCY_PER_CONNECTOR);
@@ -196,16 +198,17 @@ async function runJobs(jobs: Job[]): Promise<{ job: Job; mentions: RawMention[];
           else console.error(`[ingest] ${label}: ERRORE ${String((s.reason as Error)?.message ?? s.reason).slice(0, 120)}`);
           out.push(s.status === 'fulfilled'
             ? { job, mentions: s.value }
-            : { job, mentions: [], error: s.reason });
+            : { job, mentions: [], error: s.reason,failed:true });
         });
       }
+      counter.elapsed_ms=Math.max(0,Date.now()-started);
       return out;
     }),
   );
   return perConnector.flat();
 }
 
-export async function ingestProject(project: typeof projects.$inferSelect) {
+export async function ingestProject(project: typeof projects.$inferSelect,counters:RefreshCounters=new Map()) {
   const db = await getDb();
   const q: ListeningQuery = {
     anyTerms: project.keywords,
@@ -257,6 +260,7 @@ export async function ingestProject(project: typeof projects.$inferSelect) {
     const budget = talkwalkerDailyBudget();
     const spent = await talkwalkerCreditsSpentToday();
     if (budget > 0 && spent >= budget) {
+      refreshCounter(counters,'talkwalker').quota_skipped++;
       console.log(`[ingest] Talkwalker: budget del giorno esaurito (${spent}/${budget} credits stimati), ingestion saltata`);
       enabled = [];
       status.talkwalker = {
@@ -317,7 +321,7 @@ export async function ingestProject(project: typeof projects.$inferSelect) {
     }
   }
 
-  const results = await runJobs(jobs);
+  const results = await runJobs(jobs,counters);
 
   // Più job possono condividere lo stesso connectorId (una volta per il
   // progetto, una volta per ogni concorrente): si aggregano in un'unica riga
@@ -326,8 +330,12 @@ export async function ingestProject(project: typeof projects.$inferSelect) {
   const agg = new Map<string, { ok: boolean; count: number; error?: string }>();
   for (const r of results) {
     const job = r.job;
+    const counter=refreshCounter(counters,job.connectorId);
+    counter.fetched+=r.mentions.length;
+    try {
     const prevAgg = agg.get(job.connectorId) ?? { ok: false, count: 0 };
-    if (r.error !== undefined) {
+    if (r.failed) {
+      counter.error++;
       const err = r.error as { message?: string } | undefined;
       agg.set(job.connectorId, { ...prevAgg, error: String(err?.message ?? r.error) });
       continue;
@@ -339,6 +347,7 @@ export async function ingestProject(project: typeof projects.$inferSelect) {
       .filter((m) => !Number.isNaN(m.publishedAt.getTime())
         && m.publishedAt.getTime() < now + 3600_000
         && m.publishedAt.getTime() > now - 90 * 86400_000);
+    counter.filtered+=r.mentions.length-afterDate.length;
     // Conteggio per FASE: distingue "scartate dai termini da escludere" da
     // "scartate perché troppo vecchie" da "già in archivio" — tre cause con
     // tre rimedi diversi, che il solo totale finale confonde fra loro.
@@ -390,6 +399,7 @@ export async function ingestProject(project: typeof projects.$inferSelect) {
     // Postgres rejects both and the whole refresh fails. Clean every text field.
     const deduped = [...unique.values()].map((r) =>
       Object.fromEntries(Object.entries(r).map(([k, v]) => [k, typeof v === 'string' ? cleanStoredText(v) : v])) as typeof r);
+    counter.duplicate+=rows.length-deduped.length;
     for (let j = 0; j < deduped.length; j += 100) {
       const chunk = deduped.slice(j, j + 100);
       if (chunk.length === 0) continue;
@@ -405,10 +415,15 @@ export async function ingestProject(project: typeof projects.$inferSelect) {
             },
           })
           .returning({ inserted: sql<boolean>`(xmax = 0)` });
-        count += res.filter((x) => x.inserted).length;
+        const added=res.filter((x) => x.inserted).length;
+        count += added;
+        counter.inserted+=added;
+        counter.duplicate+=chunk.length-added;
       } else {
         const res = await db.insert(mentions).values(chunk).onConflictDoNothing().returning({ id: mentions.id });
         count += res.length;
+        counter.inserted+=res.length;
+        counter.duplicate+=chunk.length-res.length;
       }
     }
     if (deduped.length > 0 && count !== deduped.length) {
@@ -417,6 +432,10 @@ export async function ingestProject(project: typeof projects.$inferSelect) {
     }
     inserted += count;
     agg.set(job.connectorId, { ok: true, count: prevAgg.count + count });
+    } catch (error) {
+      counter.error++;
+      throw error;
+    }
   }
 
   // Costo stimato del giro Talkwalker: 10 credits a chiamata più 1 per

@@ -16,6 +16,8 @@ import { researchCanWrite } from '@/lib/web-research';
 import { pageFeedSource, pageFeedInterrupted } from '@/lib/page-feed-store';
 import { pageFeedFailure } from '@/lib/feed-from-page';
 import { PageFeedSettings } from '@/components/page-feed-settings';
+import {RefreshRunCounters} from '@/components/refresh-run-counters';
+import {refreshRunsForViewer} from '@/lib/refresh-run-store';
 
 export const metadata = { title: 'Sources' };
 
@@ -53,6 +55,7 @@ export default async function FontiPage() {
   ]);
   const canEditKeys = isAdmin(currentUser);
   const project = await getCurrentProject();
+  const refreshRuns = project ? await refreshRunsForViewer(project.id,canEditKeys) : [];
   const publisher = project ? await pageFeedSource(project.id) : null;
   const interrupted = pageFeedInterrupted(publisher);
 
@@ -64,6 +67,7 @@ export default async function FontiPage() {
       />
 
       <div className="max-w-3xl">
+        {canEditKeys&&<RefreshRunCounters runs={refreshRuns}/>}
         {project && <PageFeedSettings key={`${project.id}:${publisher?.revision ?? 0}`}
           projectId={project.id} canWrite={!isDemoMode() && !!currentUser && researchCanWrite(currentUser,project)}
           source={publisher ? { name: publisher.name, url: publisher.url, selectors: publisher.selectors,

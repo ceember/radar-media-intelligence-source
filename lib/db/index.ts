@@ -63,6 +63,7 @@ import { ARCHIVE_DDL } from '../competitor-history-ddl';
 import { NEWSJACK_PLANNING_DDL } from '../newsjack-planning-ddl';
 import { PAGE_FEED_DDL } from '../page-feed-ddl';
 import { BLUESKY_CONTEXT_DDL } from '../bluesky-context-ddl';
+import { REFRESH_RUN_DDL } from '../refresh-run-ddl';
 import { NEWSJACK_VISIBILITY_DDL } from '../newsjack-visibility-ddl';
 
 const DDL = [
@@ -509,6 +510,7 @@ const DDL = [
   `ALTER TABLE mentions ADD COLUMN IF NOT EXISTS query_ids JSONB NOT NULL DEFAULT '[]'`,
   `CREATE INDEX IF NOT EXISTS mentions_query_ids ON mentions USING gin (query_ids)`,
   ...BLUESKY_CONTEXT_DDL,
+  ...REFRESH_RUN_DDL,
 ];
 
 async function ensureSchema(db: DB) {

@@ -23,6 +23,8 @@ import { refreshPointOfViewIfStale } from '@/lib/pov';
 import { alerts as alertsTable, users as usersTable } from '@/lib/db/schema';
 import { getTrends } from '@/lib/trends';
 import { researchCanWrite } from '@/lib/web-research';
+import {startRefreshRun,finishRefreshRun} from '@/lib/refresh-run-store';
+import {refreshCounterSnapshot,type RefreshCounters} from '@/lib/refresh-run-counters';
 
 /** L'AI è attiva per il proprietario del progetto? (admin/legacy sempre sì; membri solo se abilitati) */
 async function ownerAiEnabled(db: Awaited<ReturnType<typeof getDb>>, ownerId: number | null): Promise<boolean> {
@@ -75,6 +77,9 @@ export async function runPipeline(opts: { full?: boolean; digest?: boolean; proj
     const summary: Record<string, unknown>[] = [];
 
     for (const project of allProjects) {
+      const counters:RefreshCounters=new Map();
+      const runId=await startRefreshRun(project.id,opts.system==='cron'?'cron':'refresh',db);
+      try {
       // I progetti "upload" non fanno scraping: le mention arrivano dai file
       // caricati dall'utente. La pipeline salta l'ingestion ma esegue comunque
       // l'analisi AI sulle mention ancora da taggare.
@@ -82,7 +87,7 @@ export async function runPipeline(opts: { full?: boolean; digest?: boolean; proj
         ? { inserted: 0 }
         : await (async () => {
             console.log(`[pipeline] ingestion per "${project.name}"…`);
-            const r = await ingestProject(project);
+            const r = await ingestProject(project,counters);
             console.log(`[pipeline] ingestion completata: ${r.inserted} nuove mention`);
             return r;
           })();
@@ -216,6 +221,11 @@ export async function runPipeline(opts: { full?: boolean; digest?: boolean; proj
         }
       }
       summary.push(row);
+      await finishRefreshRun(project.id,runId,'complete',refreshCounterSnapshot(counters),db);
+      } catch (error) {
+        await finishRefreshRun(project.id,runId,'failed',refreshCounterSnapshot(counters),db);
+        throw error;
+      }
     }
 
     // Retention: 90 giorni (free tier Neon) — MA SOLO SU CIÒ CHE RADAR RACCOGLIE.
